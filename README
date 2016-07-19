@@ -1,0 +1,5 @@
+This repository contains Renesas AVB Media Clock Recovery Handler driver.
+
+The drivers are released under Dual MIT&GPLv2 licenses, see GPL-COPYING and MIT-COPYING.
+
+Notice: the current version is stub for integration.

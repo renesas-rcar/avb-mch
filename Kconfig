@@ -1,0 +1,23 @@
+#
+# Renesas device configuration
+#
+
+menuconfig AVB_MCH
+	bool "AVB MCH"
+	default y
+	---help---
+	  This option enable Renesas AVB Media Clock recovery Handler (MCH) driver.
+	  MCH contains following sub modules.
+	  - MCH Core module
+
+if AVB_MCH
+
+config MCH_CORE
+	tristate "MCH Core module"
+	default m
+	---help---
+	  This option enable core functions in MCH.
+	  Core functions contains following features.
+    - TODO
+
+endif #AVB_MCH
