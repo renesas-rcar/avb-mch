@@ -18,6 +18,6 @@ config MCH_CORE
 	---help---
 	  This option enable core functions in MCH.
 	  Core functions contains following features.
-    - TODO
+	  - TODO
 
 endif #AVB_MCH
