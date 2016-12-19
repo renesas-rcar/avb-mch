@@ -1,5 +1,5 @@
 /*************************************************************************/ /*
- avb-mse
+ avb-mch
 
  Copyright (C) 2016 Renesas Electronics Corporation
 
@@ -68,8 +68,6 @@
 #include <linux/time.h>
 #include <linux/hrtimer.h>
 #include <linux/ptp_clock.h>
-
-#include "ravb_mse_kernel.h"
 
 #define MAX_PTP_DEVICES  10
 #define DELAY            3333333  /* 3.33..ms */
@@ -205,7 +203,10 @@ static int init_ptp_device(struct ptp_device *dev)
 	return 0;
 }
 
-int mse_ptp_open_dummy(int *dev_id)
+/*
+ * public functions
+ */
+int mch_ptp_open(int *dev_id)
 {
 	int i;
 	int ret;
@@ -236,8 +237,9 @@ int mse_ptp_open_dummy(int *dev_id)
 
 	return -1;
 }
+EXPORT_SYMBOL(mch_ptp_open);
 
-int mse_ptp_close_dummy(int dev_id)
+int mch_ptp_close(int dev_id)
 {
 	int ret;
 	struct ptp_device *dev;
@@ -261,8 +263,9 @@ int mse_ptp_close_dummy(int dev_id)
 
 	return 0;
 }
+EXPORT_SYMBOL(mch_ptp_close);
 
-int mse_ptp_get_time_dummy(int dev_id, struct ptp_clock_time *clock_time)
+int mch_ptp_get_time(int dev_id, struct ptp_clock_time *clock_time)
 {
 	int ret = 0;
 
@@ -280,12 +283,12 @@ int mse_ptp_get_time_dummy(int dev_id, struct ptp_clock_time *clock_time)
 
 	return ret;
 }
+EXPORT_SYMBOL(mch_ptp_get_time);
 
-
-int mse_ptp_get_timestamps_dummy(int dev_id,
-				 int ch,
-				 int *count,
-				 struct ptp_clock_time timestamps[])
+int mch_ptp_get_timestamps(int dev_id,
+			   int ch,
+			   int *count,
+			   struct ptp_clock_time timestamps[])
 {
 	struct ptp_device *dev;
 	struct ptp_queue *queue;
@@ -331,3 +334,4 @@ int mse_ptp_get_timestamps_dummy(int dev_id,
 
 	return 0;
 }
+EXPORT_SYMBOL(mch_ptp_get_timestamps);

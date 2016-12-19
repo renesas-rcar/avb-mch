@@ -6,7 +6,9 @@ ifndef CONFIG_AVB_MCH
 CONFIG_MCH_CORE ?= m
 endif
 
-mch_core-objs := mch_core_main.o
+mch_core-objs := mch_core_main.o \
+                 mch_ptp.o
+
 obj-$(CONFIG_MCH_CORE) += mch_core.o
 
 ifndef CONFIG_AVB_MCH

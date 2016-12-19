@@ -59,105 +59,40 @@
  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */ /*************************************************************************/
 
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/device.h>
-#include <linux/vmalloc.h>
+#ifndef __RAVB_MCH_H__
+#define __RAVB_MCH_H__
 
-struct mch_private {
-	/* MCH Control */
-	struct device dev;
-};
-
-struct mch_private *mch_priv_ptr;
-
-#define PPB_SCALE (1000000000ULL)
+#ifdef __KERNEL__
 
 /*
- * public functions
+ * In-Kernel API
  */
-int mch_open(int *dev_id)
-{
-	if (!dev_id)
-		return -1;
+int mch_open(int *dev_id);
 
-	*dev_id = 0;
-
-	return 0;
-}
-EXPORT_SYMBOL(mch_open);
-
-int mch_close(int dev_id)
-{
-	return 0;
-}
-EXPORT_SYMBOL(mch_close);
+int mch_close(int dev_id);
 
 int mch_send_timestamps(int dev_id, int time_rate_ns,
 			int master_count,
 			unsigned int master_timestamps[],
 			int device_count,
-			unsigned int device_timestamps[])
-{
-	return 0;
-}
-EXPORT_SYMBOL(mch_send_timestamps);
+			unsigned int device_timestamps[]);
 
-int mch_get_recovery_value(int dev_id, int *value)
-{
-	if (!value)
-		return -1;
-
-	*value = PPB_SCALE;
-
-	return 0;
-}
-EXPORT_SYMBOL(mch_get_recovery_value);
+int mch_get_recovery_value(int dev_id, int *value);
 
 /*
- * module init/cleanup
+ * In-Kernel PTP API
  */
-static int __init mch_module_init(void)
-{
-	int err;
-	struct mch_private *mch_priv;
+int mch_ptp_open(int *dev_id);
 
-	pr_info("init: start\n");
+int mch_ptp_close(int dev_id);
 
-	err = -ENOMEM;
-	mch_priv = vzalloc(sizeof(*mch_priv));
-	if (unlikely(!mch_priv))
-		goto no_memory;
+int mch_ptp_get_time(int dev_id, struct ptp_clock_time *clock_time);
 
-	mch_priv_ptr = mch_priv;
+int mch_ptp_get_timestamps(int dev_id,
+			   int ch,
+			   int *count,
+			   struct ptp_clock_time timestamps[]);
 
-	pr_info("init: success\n");
+#endif /* __KERNEL__ */
 
-	return 0;
-
-no_memory:
-	mch_priv_ptr = NULL;
-
-	pr_info("init: failed\n");
-
-	return err;
-}
-
-static void __exit mch_module_exit(void)
-{
-	struct mch_private *mch_priv = mch_priv_ptr;
-
-	pr_info("cleanup: start\n");
-
-	mch_priv_ptr = NULL;
-	vfree(mch_priv);
-
-	pr_info("cleanup: end\n");
-}
-
-module_init(mch_module_init);
-module_exit(mch_module_exit);
-
-MODULE_AUTHOR("Renesas Electronics Corporation");
-MODULE_DESCRIPTION("Renesas Media Clock recovery Handler");
-MODULE_LICENSE("Dual MIT/GPL");
+#endif /* __RAVB_MCH_H__ */
