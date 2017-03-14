@@ -1,7 +1,7 @@
 /*************************************************************************/ /*
  avb-mch
 
- Copyright (C) 2016 Renesas Electronics Corporation
+ Copyright (C) 2016-2017 Renesas Electronics Corporation
 
  License        Dual MIT/GPLv2
 
@@ -68,48 +68,27 @@
 #include <linux/time.h>
 #include <linux/hrtimer.h>
 #include <linux/ptp_clock.h>
+#include <../drivers/net/ethernet/renesas/ravb.h>
+#include "mch_core.h"
 
-#define MAX_PTP_DEVICES  10
-#define DELAY            3333333  /* 3.33..ms */
+#define NSEC 1000000000UL
 
-#define MAX_TIMESTAMPS   100
+extern struct mch_private *mch_priv_ptr;
+int mch_ptp_get_time(int dev_id, struct ptp_clock_time *clock_time);
 
-#define q_next(n)        (((n) + 1) % MAX_TIMESTAMPS)
-
-/* structs */
-struct ptp_queue {
-	int head;
-	int tail;
-	struct ptp_clock_time timestamps[MAX_TIMESTAMPS];
-};
-
-struct ptp_device {
-	struct ptp_queue	que;
-	struct			hrtimer timer;
-	int			timer_delay;
-	spinlock_t		qlock;
-};
-
-/* total devices */
-static struct ptp_device *g_ptp_devices[MAX_PTP_DEVICES];
+static DEFINE_SPINLOCK(mch_ptp_lock);
 
 static int enqueue(struct ptp_queue *que, struct ptp_clock_time *clock_time)
 {
-	int is_tail_equal_head = 0;
-
-	pr_debug("[%s] START head=%d, tail=%d\n",
-		__func__, que->head, que->tail);
-
-	if (q_next(que->tail) == que->head)
-		is_tail_equal_head = 1;
+	if (q_next(que->tail, MAX_TIMESTAMPS) == que->head)
+		que->head = q_next(que->head, MAX_TIMESTAMPS);
 
 	que->timestamps[que->tail] = *clock_time;
-	que->tail = q_next(que->tail);
 
-	if (is_tail_equal_head) {
-		que->head = q_next(que->head);
-		is_tail_equal_head = 0;
-	}
+	que->tail = q_next(que->tail, MAX_TIMESTAMPS);
+
+	if (que->cnt < MAX_TIMESTAMPS)
+		que->cnt++;
 
 	return 0;
 }
@@ -120,83 +99,224 @@ static int dequeue(struct ptp_queue *que, struct ptp_clock_time *clock_time)
 		return -1;
 
 	*clock_time = que->timestamps[que->head];
-	que->head = q_next(que->head);
+
+	que->head = q_next(que->head, MAX_TIMESTAMPS);
+
+	if (!que->cnt)
+		que->cnt--;
 
 	return 0;
 }
 
-static int get_clock_time(struct ptp_clock_time *clock_time)
+static int check_queue(struct ptp_queue *que)
 {
-	struct timespec time;
-
-	/* TODO get time from ptp driver */
-	getnstimeofday(&time);
-	clock_time->sec = time.tv_sec;
-	clock_time->nsec = time.tv_nsec;
-
-	return 0;
-}
-
-static enum hrtimer_restart ptp_timestamp_callbak(struct hrtimer *arg)
-{
-	struct ptp_device *dev;
-	ktime_t ktime;
-	struct ptp_queue *queue;
-	struct ptp_clock_time *clock_time;
-	unsigned long flags;
 	int ret;
 
-	dev = container_of(arg, struct ptp_device, timer);
+	if (que->tail > que->head)
+		ret = que->tail - que->head;
+	else if (que->tail < que->head)
+		ret = (que->tail + MAX_TIMESTAMPS) - que->head;
+	else /* if (que->head == que->tail) */
+		ret = 0;
 
-	spin_lock_irqsave(&dev->qlock, flags);
-
-	ktime = ktime_set(0, dev->timer_delay);
-	hrtimer_forward(&dev->timer,
-			hrtimer_get_expires(&dev->timer),
-			ktime);
-
-	clock_time = kzalloc(sizeof(*clock_time), GFP_ATOMIC);
-	if (!clock_time) {
-		pr_warn("[%s] failed allocate clock_time\n", __func__);
-		spin_unlock(&dev->qlock);
-		return HRTIMER_RESTART;
-	}
-
-	ret = get_clock_time(clock_time);
-	if (ret) {
-		pr_warn("[%s] failed get_clock_time\n", __func__);
-		spin_unlock(&dev->qlock);
-		return HRTIMER_RESTART;
-	}
-
-	/* add to queue */
-	queue = &dev->que;
-	enqueue(queue, clock_time);
-
-	spin_unlock_irqrestore(&dev->qlock, flags);
-
-	return HRTIMER_RESTART;
+	return ret;
 }
 
-static int init_ptp_device(struct ptp_device *dev)
+static int mch_ptp_timestamp_enqueue(struct mch_private *priv,
+				     u64 timestamp, int ch)
 {
-	ktime_t ktime;
+	int i;
+	struct ptp_clock_time cap_time;
+	struct ptp_device *p_dev;
+	struct ptp_queue *queue;
+	unsigned long flags;
+
+	cap_time.sec = timestamp / NSEC;
+	cap_time.nsec = timestamp % NSEC;
+
+	for (i = 0; i < ARRAY_SIZE(priv->p_dev); i++) {
+		if (priv->p_dev[i]) {
+			if (ch == priv->param.avtp_cap_ch) {
+				p_dev = priv->p_dev[i];
+				/* add to queue */
+				queue = &p_dev->que;
+				spin_lock_irqsave(&p_dev->qlock, flags);
+				enqueue(queue, &cap_time);
+				spin_unlock_irqrestore(&p_dev->qlock, flags);
+			}
+		}
+	}
+
+	return 0;
+}
+
+static void mch_ptp_correct_timestamp(struct mch_private *priv,
+				      int ch,
+				      u64 ptp_timestamp_u32,
+				      u64 ptp_timestamp_l32,
+				      u64 ptp_timestamp_l)
+{
+	u32 timestamp;
+	u64 timestamp_tmp;
+	u64 cap_timestamp;
+
+	timestamp = priv->timestamp[ch];
+
+	switch (priv->avtp_cap_status[ch]) {
+	case AVTP_CAP_STATE_INIT:
+		cap_timestamp = 0;
+		priv->avtp_cap_status[ch] = AVTP_CAP_STATE_UNLOCK;
+		break;
+
+	case AVTP_CAP_STATE_UNLOCK:
+	case AVTP_CAP_STATE_LOCK:
+		timestamp_tmp = (u64)timestamp;
+		if (priv->pre_timestamp[ch] > timestamp)
+			timestamp_tmp += U32_MAX;
+
+		if ((priv->pre_timestamp[ch] <= priv->pre_ptp_timestamp_l32) &&
+		    (timestamp_tmp <= ptp_timestamp_l)) {
+			priv->avtp_cap_status[ch] = AVTP_CAP_STATE_LOCK;
+			/* ptp precedes avtp_cap */
+			if (ptp_timestamp_l32 >= timestamp) {
+				cap_timestamp = ptp_timestamp_u32 | timestamp;
+			} else {
+				cap_timestamp = (ptp_timestamp_u32 - (u64)BIT_ULL(32)) | timestamp;
+				/* TODO work around */
+				if (cap_timestamp + NSEC < priv->pre_cap_timestamp[ch])
+					cap_timestamp = ptp_timestamp_u32 | timestamp;
+			}
+
+		} else if ((priv->pre_timestamp[ch] > priv->pre_ptp_timestamp_l32) &&
+			   (timestamp_tmp > ptp_timestamp_l)) {
+			priv->avtp_cap_status[ch] = AVTP_CAP_STATE_LOCK;
+			/* avtp_cap precedes ptp */
+			if (ptp_timestamp_l32 <= timestamp) {
+				cap_timestamp = ptp_timestamp_u32 | timestamp;
+			} else {
+				cap_timestamp = (ptp_timestamp_u32 + (u64)BIT_ULL(32)) | timestamp;
+				/* TODO work around */
+				if (cap_timestamp - NSEC > priv->pre_cap_timestamp[ch])
+					cap_timestamp = ptp_timestamp_u32 | timestamp;
+			}
+		} else {
+			/* TODO : timestamp error */
+			cap_timestamp = 0;
+			priv->avtp_cap_status[ch] = AVTP_CAP_STATE_UNLOCK;
+			pr_info("ptp timestamp unlock\n");
+			pr_debug("%d\t %u\t %llu\t %llu\t %llu\t%llu\t %u\n",
+				 ch,
+				 priv->pre_timestamp[ch],
+				 priv->pre_ptp_timestamp_l32,
+				 timestamp_tmp,
+				 ptp_timestamp_l,
+				 ptp_timestamp_l32,
+				 timestamp);
+		}
+		break;
+
+	default:
+		cap_timestamp = 0;
+		priv->avtp_cap_status[ch] = AVTP_CAP_STATE_INIT;
+	}
+
+	/* check enqueue */
+	if (priv->avtp_cap_status[ch] != AVTP_CAP_STATE_INIT) {
+		if (cap_timestamp < priv->pre_cap_timestamp[ch]) {
+			priv->avtp_cap_status[ch] = AVTP_CAP_STATE_UNLOCK;
+			pr_info("capture timestamp unlock  %llu  %llu\n", cap_timestamp,
+				priv->pre_cap_timestamp[ch]);
+			/* TODO: */
+			priv->pre_cap_timestamp[ch] += priv->timestamp_diff[ch];
+			mch_ptp_timestamp_enqueue(priv,
+						  priv->pre_cap_timestamp[ch], ch);
+		}
+	}
+
+	if (priv->avtp_cap_status[ch] == AVTP_CAP_STATE_LOCK) {
+		if (priv->pre_cap_timestamp[ch]) {
+			while (priv->pre_cap_timestamp[ch] + priv->timestamp_diff[ch] + 2000000 < cap_timestamp) {
+				pr_debug("%llu interrupt fail %llu %llu\n", cap_timestamp,
+					 priv->pre_cap_timestamp[ch], priv->timestamp_diff[ch]);
+				/* timestamp jump, interpolation */
+				priv->pre_cap_timestamp[ch] += priv->timestamp_diff[ch];
+				mch_ptp_timestamp_enqueue(priv,
+							  priv->pre_cap_timestamp[ch], ch);
+			}
+			if ((cap_timestamp - priv->pre_cap_timestamp[ch] > priv->timestamp_diff_init - 200000) &&
+			    (cap_timestamp - priv->pre_cap_timestamp[ch] < priv->timestamp_diff_init + 200000))
+				priv->timestamp_diff[ch] = cap_timestamp - priv->pre_cap_timestamp[ch];
+		}
+
+		mch_ptp_timestamp_enqueue(priv, cap_timestamp, ch);
+		priv->pre_cap_timestamp[ch] = cap_timestamp;
+	} else {
+		priv->timestamp_diff[ch] = priv->timestamp_diff_init;
+		priv->pre_cap_timestamp[ch] = 0;
+	}
+
+	priv->pre_timestamp[ch] = timestamp;
+}
+
+irqreturn_t mch_ptp_timestamp_interrupt(int irq, void *dev_id)
+{
+	struct mch_private *priv = dev_id;
+	struct ptp_clock_time ptp_time;
+	int i;
+	u64 ptp_timestamp;
+	u64 ptp_timestamp_u32, ptp_timestamp_l32;
+	u64 ptp_timestamp_l;
+
+	ptp_time.sec = 0;
+	ptp_time.nsec = 0;
+
+	mch_ptp_get_time(0, &ptp_time);
+
+	ptp_timestamp = (ptp_time.sec * NSEC + ptp_time.nsec);
+	ptp_timestamp_u32 = ptp_timestamp & 0xffffffff00000000;
+	ptp_timestamp_l32 = ptp_timestamp & 0x00000000ffffffff;
+	ptp_timestamp_l   = ptp_timestamp_l32;
+
+	if (priv->pre_ptp_timestamp_l32 > ptp_timestamp_l)
+		ptp_timestamp_l += U32_MAX;
+
+	for (i = 0; i < AVTP_CAP_DEVICES ; i++)
+		if (test_and_clear_bit(i, priv->timestamp_irqf))
+			mch_ptp_correct_timestamp(
+				priv, i,
+				ptp_timestamp_u32, ptp_timestamp_l32,
+				ptp_timestamp_l);
+
+	priv->pre_ptp_timestamp_u32 = ptp_timestamp_u32;
+	priv->pre_ptp_timestamp_l32 = ptp_timestamp_l32;
+
+	return IRQ_HANDLED;
+}
+
+static int init_ptp_device(struct ptp_device *p_dev)
+{
+	struct mch_private *priv = p_dev->priv;
+	struct net_device *ndev = priv->ndev;
+	int ch;
 
 	pr_debug("[%s] START\n", __func__);
 
-	dev->que.head = 0;
-	dev->que.tail = 0;
+	p_dev->que.head = 0;
+	p_dev->que.tail = 0;
+	p_dev->que.cnt = 0;
 
-	spin_lock_init(&dev->qlock);
+	spin_lock_init(&p_dev->qlock);
 
-	/* init timer */
-	hrtimer_init(&dev->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	dev->timer_delay = DELAY;
-	dev->timer.function = &ptp_timestamp_callbak;
+	ch = priv->param.avtp_cap_ch;
 
-	/* start timer */
-	ktime = ktime_set(0, dev->timer_delay);
-	hrtimer_start(&dev->timer, ktime, HRTIMER_MODE_REL);
+	priv->avtp_cap_status[ch] = AVTP_CAP_STATE_INIT;
+	priv->pre_cap_timestamp[ch] = 0;
+	priv->timestamp_diff_init = NSEC / priv->param.avtp_cap_cycle;
+	priv->timestamp_diff[ch] = priv->timestamp_diff_init;
+
+	priv->interrupt_enable_cnt[ch]++;
+	if (priv->interrupt_enable_cnt[ch])
+		ravb_write(ndev, BIT(17 + ch), GIE);
 
 	pr_debug("[%s] END\n", __func__);
 
@@ -208,58 +328,82 @@ static int init_ptp_device(struct ptp_device *dev)
  */
 int mch_ptp_open(int *dev_id)
 {
+	struct mch_private *priv = mch_priv_ptr;
 	int i;
 	int ret;
-	struct ptp_device *dev = NULL;
+	struct ptp_device *p_dev = NULL;
+	unsigned long flags;
 
-	for (i = 0; i < ARRAY_SIZE(g_ptp_devices); i++) {
-		if (g_ptp_devices[i])
-			continue;
+	*dev_id = -1;
 
-		dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-		if (!dev) {
-			pr_err("[%s] could not create ptp_device\n", __func__);
-			return -ENOMEM;
-		}
+	if (!dev_id)
+		return -EINVAL;
 
-		/* change to pr_debug */
-		g_ptp_devices[i] = dev;
-		pr_info("[%s] registered ptp device index=%d\n",
-			__func__, i);
-		*dev_id = i;
+	if (!priv)
+		return -ENODEV;
 
-		ret = init_ptp_device(dev);
+	p_dev = kzalloc(sizeof(*p_dev), GFP_KERNEL);
+	if (!p_dev)
+		return -ENOMEM;
 
-		return 0;
+	spin_lock_irqsave(&mch_ptp_lock, flags);
+
+	for (i = 0; i < ARRAY_SIZE(priv->p_dev) && priv->p_dev[i]; i++)
+		;
+
+	if (i >= ARRAY_SIZE(priv->p_dev)) {
+		pr_err("cannot register mch_ptp device\n");
+		spin_unlock_irqrestore(&mch_ptp_lock, flags);
+		kfree(p_dev);
+		return -EBUSY;
 	}
 
-	pr_err("[%s] unregistered ptp device\n", __func__);
+	p_dev->dev_id = i;
+	p_dev->priv = priv;
+	priv->p_dev[i] = p_dev;
 
-	return -1;
+	spin_unlock_irqrestore(&mch_ptp_lock, flags);
+
+	ret = init_ptp_device(p_dev);
+
+	pr_info("registered mch_ptp device index=%d\n", i);
+	*dev_id = i;
+
+	return 0;
 }
 EXPORT_SYMBOL(mch_ptp_open);
 
 int mch_ptp_close(int dev_id)
 {
-	int ret;
-	struct ptp_device *dev;
+	struct mch_private *priv = mch_priv_ptr;
+	struct net_device *ndev = priv->ndev;
+	struct ptp_device *p_dev;
+	int ch;
+	unsigned long flags;
 
-	if ((dev_id < 0) || (dev_id >= MAX_PTP_DEVICES)) {
-		pr_err("[%s] invalid argument. index=%d\n", __func__, dev_id);
+	if (!priv)
+		return -ENODEV;
+
+	if ((dev_id < 0) || (dev_id >= PTP_DEVID_MAX))
 		return -EINVAL;
-	}
 
-	pr_info("[%s] index=%d\n", __func__, dev_id);
+	spin_lock_irqsave(&mch_ptp_lock, flags);
 
-	dev = g_ptp_devices[dev_id];
+	p_dev = priv->p_dev[dev_id];
+	if (!p_dev)
+		return 0;
+	priv->p_dev[dev_id] = NULL;
 
-	/* timer stop */
-	ret = hrtimer_try_to_cancel(&dev->timer);
-	if (ret)
-		pr_err("[%s] The timer was still in use...\n", __func__);
+	spin_unlock_irqrestore(&mch_ptp_lock, flags);
 
-	kfree(dev);
-	g_ptp_devices[dev_id] = NULL;
+	ch = priv->param.avtp_cap_ch;
+	priv->interrupt_enable_cnt[ch]--;
+	if (!priv->interrupt_enable_cnt[ch])
+		ravb_write(ndev, BIT(17 + ch), GID);
+
+	kfree(p_dev);
+
+	pr_info("close mch_ptp device  index=%d\n", dev_id);
 
 	return 0;
 }
@@ -267,21 +411,28 @@ EXPORT_SYMBOL(mch_ptp_close);
 
 int mch_ptp_get_time(int dev_id, struct ptp_clock_time *clock_time)
 {
-	int ret = 0;
+	struct mch_private *priv = mch_priv_ptr;
+	struct ravb_private *ndev_priv;
+	struct timespec64 ts;
+	struct ptp_clock_info *ptp;
 
-	if ((dev_id < 0) || (dev_id >= MAX_PTP_DEVICES)) {
-		pr_err("[%s] invalid argument. index=%d\n", __func__, dev_id);
+	if (!priv)
+		return -ENODEV;
+
+	if ((dev_id < 0) || (dev_id >= PTP_DEVID_MAX))
 		return -EINVAL;
-	}
 
-	if (!g_ptp_devices[dev_id]) {
-		pr_err("[%s] invalid dev_id=%d\n", __func__, dev_id);
-		return -EINVAL;
-	}
+	ndev_priv = netdev_priv(priv->ndev);
+	ptp = &ndev_priv->ptp.info;
 
-	ret = get_clock_time(clock_time);
+	if (!ptp->gettime64)
+		return -ENODEV;
 
-	return ret;
+	ptp->gettime64(ptp, &ts);
+	clock_time->sec = ts.tv_sec;
+	clock_time->nsec = ts.tv_nsec;
+
+	return 0;
 }
 EXPORT_SYMBOL(mch_ptp_get_time);
 
@@ -290,45 +441,41 @@ int mch_ptp_get_timestamps(int dev_id,
 			   int *count,
 			   struct ptp_clock_time timestamps[])
 {
-	struct ptp_device *dev;
+	struct mch_private *priv = mch_priv_ptr;
+	struct ptp_device *p_dev;
 	struct ptp_queue *queue;
 	struct ptp_clock_time clock_time;
 	int i;
+	unsigned long flags;
 
 	pr_debug("[%s] START\n", __func__);
 
-	if ((dev_id < 0) || (dev_id >= MAX_PTP_DEVICES)) {
-		pr_err("[%s] invalid argument. index=%d\n", __func__, dev_id);
+	if (!priv)
+		return -ENODEV;
+
+	if ((dev_id < 0) || (dev_id >= PTP_DEVID_MAX))
 		return -EINVAL;
-	}
 
-	dev = g_ptp_devices[dev_id];
-	if (!dev) {
-		pr_err("[%s] invalid dev_id=%d\n", __func__, dev_id);
+	p_dev = priv->p_dev[dev_id];
+	if (!p_dev)
 		return -EINVAL;
-	}
 
-	spin_lock(&dev->qlock);
+	spin_lock_irqsave(&p_dev->qlock, flags);
 
-	queue = &dev->que;
+	queue = &p_dev->que;
 
-	if (queue->tail > queue->head)
-		*count = queue->tail - queue->head;
-	else
-		*count = (queue->tail + MAX_TIMESTAMPS) - queue->head;
-
+	*count = check_queue(queue);
 	if (*count == 0) {
-		spin_unlock(&dev->qlock);
+		spin_unlock_irqrestore(&p_dev->qlock, flags);
 		return 0;
 	}
 
-	pr_debug("[%s] total=%d\n", __func__, *count);
 	for (i = 0; i < *count; i++) {
 		dequeue(queue, &clock_time);
 		timestamps[i] = clock_time;
 	}
 
-	spin_unlock(&dev->qlock);
+	spin_unlock_irqrestore(&p_dev->qlock, flags);
 
 	pr_debug("[%s] END\n", __func__);
 
