@@ -62,6 +62,8 @@
 #ifndef __MCH_CORE_H__
 #define __MCH_CORE_H__
 
+#include "ravb_mch.h"
+
 #define MCH_DEVID_MAX    1
 #define PTP_DEVID_MAX    10
 #define MAX_TIMESTAMPS   100

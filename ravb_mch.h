@@ -1,7 +1,7 @@
 /*************************************************************************/ /*
  avb-mch
 
- Copyright (C) 2016 Renesas Electronics Corporation
+ Copyright (C) 2016-2017 Renesas Electronics Corporation
 
  License        Dual MIT/GPLv2
 
@@ -82,11 +82,14 @@ int mch_get_recovery_value(int dev_id, int *value);
 /*
  * In-Kernel PTP API
  */
+int mch_ptp_get_time(u64 *ns);
+
+/*
+ * In-Kernel PTP Capture API
+ */
 int mch_ptp_open(int *dev_id);
 
 int mch_ptp_close(int dev_id);
-
-int mch_ptp_get_time(int dev_id, struct ptp_clock_time *clock_time);
 
 int mch_ptp_get_timestamps(int dev_id,
 			   int ch,

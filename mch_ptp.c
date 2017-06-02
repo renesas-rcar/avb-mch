@@ -74,7 +74,6 @@
 #define NSEC 1000000000UL
 
 extern struct mch_private *mch_priv_ptr;
-int mch_ptp_get_time(int dev_id, struct ptp_clock_time *clock_time);
 
 static DEFINE_SPINLOCK(mch_ptp_lock);
 
@@ -261,18 +260,12 @@ static void mch_ptp_correct_timestamp(struct mch_private *priv,
 irqreturn_t mch_ptp_timestamp_interrupt(int irq, void *dev_id)
 {
 	struct mch_private *priv = dev_id;
-	struct ptp_clock_time ptp_time;
 	int i;
 	u64 ptp_timestamp;
 	u64 ptp_timestamp_u32, ptp_timestamp_l32;
 	u64 ptp_timestamp_l;
 
-	ptp_time.sec = 0;
-	ptp_time.nsec = 0;
-
-	mch_ptp_get_time(0, &ptp_time);
-
-	ptp_timestamp = (ptp_time.sec * NSEC + ptp_time.nsec);
+	mch_ptp_get_time(&ptp_timestamp);
 	ptp_timestamp_u32 = ptp_timestamp & 0xffffffff00000000;
 	ptp_timestamp_l32 = ptp_timestamp & 0x00000000ffffffff;
 	ptp_timestamp_l   = ptp_timestamp_l32;
@@ -325,6 +318,36 @@ static int init_ptp_device(struct ptp_device *p_dev)
 
 /*
  * public functions
+ */
+
+/*
+ * In-Kernel PTP API
+ */
+int mch_ptp_get_time(u64 *ns)
+{
+	struct mch_private *priv = mch_priv_ptr;
+	struct ravb_private *ndev_priv;
+	struct timespec64 ts;
+	struct ptp_clock_info *ptp;
+
+	if (!priv)
+		return -ENODEV;
+
+	ndev_priv = netdev_priv(priv->ndev);
+	ptp = &ndev_priv->ptp.info;
+
+	if (!ptp->gettime64)
+		return -ENODEV;
+
+	ptp->gettime64(ptp, &ts);
+	*ns = (u64)timespec64_to_ns(&ts);
+
+	return 0;
+}
+EXPORT_SYMBOL(mch_ptp_get_time);
+
+/*
+ * In-Kernel PTP Capture API
  */
 int mch_ptp_open(int *dev_id)
 {
@@ -408,33 +431,6 @@ int mch_ptp_close(int dev_id)
 	return 0;
 }
 EXPORT_SYMBOL(mch_ptp_close);
-
-int mch_ptp_get_time(int dev_id, struct ptp_clock_time *clock_time)
-{
-	struct mch_private *priv = mch_priv_ptr;
-	struct ravb_private *ndev_priv;
-	struct timespec64 ts;
-	struct ptp_clock_info *ptp;
-
-	if (!priv)
-		return -ENODEV;
-
-	if ((dev_id < 0) || (dev_id >= PTP_DEVID_MAX))
-		return -EINVAL;
-
-	ndev_priv = netdev_priv(priv->ndev);
-	ptp = &ndev_priv->ptp.info;
-
-	if (!ptp->gettime64)
-		return -ENODEV;
-
-	ptp->gettime64(ptp, &ts);
-	clock_time->sec = ts.tv_sec;
-	clock_time->nsec = ts.tv_nsec;
-
-	return 0;
-}
-EXPORT_SYMBOL(mch_ptp_get_time);
 
 int mch_ptp_get_timestamps(int dev_id,
 			   int ch,
