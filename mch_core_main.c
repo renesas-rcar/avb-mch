@@ -82,10 +82,6 @@ struct mch_private *mch_priv_ptr;
 #define AVB_COUNTER_FRQ_MAX 25000000
 #define CS2000_ID           0x06
 
-#define AVTP_CAP_CH_INIT 2
-#define AVTP_CAP_CH_MIN  2
-#define AVTP_CAP_CH_MAX  13
-
 #define MCH_CORRECT_CYCLE      (5 * 1000000) /* 5msec */
 #define MCH_TIME_TOLERANCE     (2 * 1000000) /* 2msec */
 #define MCH_CORRECT_JUDGE_OVER (3 * 1000000) /* 3msec */
@@ -159,9 +155,6 @@ enum TASK_EVENT {
 
 static char *interface = "eth0";
 module_param(interface, charp, 0440);
-
-static int avtp_cap_ch = AVTP_CAP_CH_INIT;
-module_param(avtp_cap_ch, int, 0660);
 
 static int avtp_cap_cycle = 300;
 module_param(avtp_cap_cycle, int, 0660);
@@ -565,12 +558,6 @@ static int mch_check_params(struct mch_param *param)
 {
 	u32 reg;
 
-	if ((param->avtp_cap_ch < AVTP_CAP_CH_MIN) ||
-	    (param->avtp_cap_ch > AVTP_CAP_CH_MAX)) {
-		pr_err("invalid param.\n");
-		return -EINVAL;
-	}
-
 	if ((param->avtp_clk_frq < AVB_COUNTER_FRQ_MIN) ||
 	    (param->avtp_clk_frq > AVB_COUNTER_FRQ_MAX)) {
 		pr_err("invalid param.\n");
@@ -615,8 +602,8 @@ static int mch_regist_adg(struct mch_private *priv)
 	return 0;
 }
 
-static int mch_set_adg_avb_sync_sel(struct mch_private *priv, int ch,
-				    char *clk_name)
+int mch_set_adg_avb_sync_sel(struct mch_private *priv, int ch,
+			     char *clk_name)
 {
 	u32 sync_sel, reg, val;
 
@@ -949,30 +936,8 @@ static int mch_get_net_device_handle(struct mch_private *priv)
 	return 0;
 }
 
-static irqreturn_t mch_interrupt(int irq, void *data)
-{
-	struct mch_private *priv = data;
-	struct net_device *ndev = priv->ndev;
-	u32 gis = ravb_read(ndev, GIS);
-	irqreturn_t ret = IRQ_NONE;
-	int i;
-
-	gis &= ravb_read(ndev, GIC);
-	for (i = 0; i < AVTP_CAP_DEVICES; i++) {
-		if (gis & BIT(17 + i)) {
-			priv->timestamp[i] =
-				ravb_read(ndev, GCAT0 + (4 * (i + 1)));
-			set_bit(i, priv->timestamp_irqf);
-			ravb_write(ndev, ~BIT(17 + i), GIS);
-			ret = IRQ_WAKE_THREAD;
-		}
-	}
-
-	return ret;
-}
-
-static int mch_regist_ravb(struct mch_private *priv, int freq,
-			   int cap_cycle, int ch)
+int mch_regist_ravb(struct mch_private *priv, int freq,
+		    int cap_cycle, int ch)
 {
 	struct net_device *ndev = priv->ndev;
 	u32 val, tmp;
@@ -1012,8 +977,11 @@ static int mch_unregist_ravb(struct mch_private *priv)
 	return 0;
 }
 
-static int mch_regist_interrupt(struct mch_private *priv,
-				const char *ch, const char *name)
+int mch_regist_interrupt(struct mch_private *priv,
+			 const char *ch,
+			 const char *name,
+			 irqreturn_t (*func_i)(int, void *),
+			 irqreturn_t (*func_t)(int, void *))
 {
 	struct net_device *ndev = priv->ndev;
 	struct ravb_private *net_priv = netdev_priv(ndev);
@@ -1022,27 +990,42 @@ static int mch_regist_interrupt(struct mch_private *priv,
 	int irq;
 	int err;
 
+	if (WARN_ON(net_priv->chip_id != RCAR_GEN3))
+		return -EPERM;
+
 	/* regist interrupt of avtp capture */
-	if (net_priv->chip_id == RCAR_GEN3) {
-		irq = platform_get_irq_byname(net_priv->pdev, ch);
-		if (irq < 0) {
-			pr_err("init: unsupport irq name (%s)\n", ch);
-			err = irq;
-			return err;
-		}
-		irq_name = devm_kasprintf(dev, GFP_KERNEL,
-					  "%s:%s:%s",
-					  ndev->name, ch, name);
-		err = devm_request_threaded_irq(dev, irq, mch_interrupt,
-						mch_ptp_timestamp_interrupt,
-						IRQF_SHARED, irq_name,
-						priv);
-		if (err) {
-			pr_err("request_irq(%d,%s) error\n", irq, irq_name);
-			return  err;
-		}
-		priv->irq = irq;
+	irq = platform_get_irq_byname(net_priv->pdev, ch);
+	if (irq < 0) {
+		pr_err("init: unsupport irq name (%s)\n", ch);
+		return irq;
 	}
+
+	irq_name = devm_kasprintf(dev, GFP_KERNEL,
+				  "%s:%s:%s",
+				  ndev->name, ch, name);
+
+	if (func_t)
+		err = devm_request_threaded_irq(dev,
+						irq,
+						func_i,
+						func_t,
+						IRQF_SHARED,
+						irq_name,
+						priv);
+	else
+		err = devm_request_irq(dev,
+				       irq,
+				       func_i,
+				       IRQF_SHARED,
+				       irq_name,
+				       priv);
+
+	if (err) {
+		pr_err("request_irq(%d,%s) error\n", irq, irq_name);
+		return  err;
+	}
+
+	priv->irq = irq;
 
 	return 0;
 }
@@ -1080,7 +1063,6 @@ static int mch_probe(struct platform_device *pdev)
 	mch_priv_ptr = priv;
 
 	param = &priv->param;
-	param->avtp_cap_ch = avtp_cap_ch;
 	param->avtp_cap_cycle = avtp_cap_cycle;
 	param->avtp_clk_frq = avtp_clk_frq;
 	strncpy(param->avtp_clk_name, avtp_clk_name,
@@ -1090,12 +1072,12 @@ static int mch_probe(struct platform_device *pdev)
 	err = mch_check_params(param);
 	if (err < 0)
 		goto out_release;
-	priv->param.avtp_cap_ch -= AVTP_CAP_CH_MIN;
 
 	priv->pdev = pdev;
 	priv->dev = &pdev->dev;
 	priv->dev->release = mch_release;
 	dev_set_drvdata(&pdev->dev, priv);
+	priv->timestamp_diff_init = NSEC / param->avtp_cap_cycle;
 
 	err = mch_get_net_device_handle(priv);
 	if (err < 0)
@@ -1103,6 +1085,11 @@ static int mch_probe(struct platform_device *pdev)
 
 	for (i = 0; i < MCH_DEVID_MAX; i++)
 		priv->m_dev[i] = NULL;
+
+	/* MCH PTP Capture device initialize */
+	err = mch_ptp_capture_init(priv);
+	if (err < 0)
+		goto out_release;
 
 	priv->adg_avb_addr = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(priv->adg_avb_addr)) {
@@ -1138,10 +1125,6 @@ static int mch_probe(struct platform_device *pdev)
 
 	memcpy(cs2000_data, cs2000_data_bk, sizeof(cs2000_data));
 
-	err = mch_regist_interrupt(priv, "ch22", "multi_A");
-	if (err < 0)
-		goto out_release;
-
 	/* register initialize for ADG */
 	mch_regist_adg(priv);
 
@@ -1154,16 +1137,8 @@ static int mch_probe(struct platform_device *pdev)
 				 param->frq,
 				 param->avtp_cap_cycle,
 				 param->avtp_clk_name);
-	mch_set_adg_avb_sync_sel(priv,
-				 param->avtp_cap_ch,
-				 param->avtp_clk_name);
 
 	mch_set_adg_avbckr(priv, param->avtp_clk_name);
-
-	/* register initialize for RAVB */
-	mch_regist_ravb(priv, param->frq,
-			param->avtp_cap_cycle,
-			param->avtp_cap_ch);
 
 	/* CS2000-cp initialize */
 	mch_set_cs2000(priv, 24576000, param->frq);
@@ -1204,6 +1179,9 @@ static int mch_remove(struct platform_device *pdev)
 
 	/* In-Kernel API close */
 	mch_close(priv->m_dev[0]);
+
+	/* MCH PTP Capture cleanup */
+	mch_ptp_capture_cleanup(priv);
 
 	mch_priv_ptr = NULL;
 	vfree(priv);

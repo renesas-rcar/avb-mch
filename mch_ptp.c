@@ -68,85 +68,85 @@
 #include <linux/time.h>
 #include <linux/hrtimer.h>
 #include <linux/ptp_clock.h>
+#include <linux/list.h>
 #include <../drivers/net/ethernet/renesas/ravb.h>
-#include "mch_core.h"
 
-#define NSEC 1000000000UL
+#include "mch_core.h"
 
 extern struct mch_private *mch_priv_ptr;
 
-static DEFINE_SPINLOCK(mch_ptp_lock);
+static DEFINE_SPINLOCK(mch_ptp_cap_lock);
 
-static int enqueue(struct ptp_queue *que, struct ptp_clock_time *clock_time)
+/*
+ * PTP Capture
+ */
+static int enqueue(struct ptp_queue *que, u64 ts)
 {
-	if (q_next(que->tail, MAX_TIMESTAMPS) == que->head)
-		que->head = q_next(que->head, MAX_TIMESTAMPS);
+	if (q_next(que->tail, que->max_cnt) == que->head)
+		que->head = q_next(que->head, que->max_cnt);
 
-	que->timestamps[que->tail] = *clock_time;
+	que->timestamps[que->tail] = ts;
 
-	que->tail = q_next(que->tail, MAX_TIMESTAMPS);
-
-	if (que->cnt < MAX_TIMESTAMPS)
-		que->cnt++;
+	que->tail = q_next(que->tail, que->max_cnt);
 
 	return 0;
 }
 
-static int dequeue(struct ptp_queue *que, struct ptp_clock_time *clock_time)
+static int dequeue(struct ptp_queue *que, u64 *ts)
 {
 	if (que->head == que->tail)
 		return -1;
 
-	*clock_time = que->timestamps[que->head];
+	*ts = que->timestamps[que->head];
 
-	que->head = q_next(que->head, MAX_TIMESTAMPS);
-
-	if (!que->cnt)
-		que->cnt--;
+	que->head = q_next(que->head, que->max_cnt);
 
 	return 0;
-}
-
-static int check_queue(struct ptp_queue *que)
-{
-	int ret;
-
-	if (que->tail > que->head)
-		ret = que->tail - que->head;
-	else if (que->tail < que->head)
-		ret = (que->tail + MAX_TIMESTAMPS) - que->head;
-	else /* if (que->head == que->tail) */
-		ret = 0;
-
-	return ret;
 }
 
 static int mch_ptp_timestamp_enqueue(struct mch_private *priv,
 				     u64 timestamp, int ch)
 {
-	int i;
-	struct ptp_clock_time cap_time;
 	struct ptp_device *p_dev;
-	struct ptp_queue *queue;
+	struct ptp_capture_device *cap;
 	unsigned long flags;
 
-	cap_time.sec = timestamp / NSEC;
-	cap_time.nsec = timestamp % NSEC;
+	cap = &priv->cap_dev[ch];
 
-	for (i = 0; i < ARRAY_SIZE(priv->p_dev); i++) {
-		if (priv->p_dev[i]) {
-			if (ch == priv->param.avtp_cap_ch) {
-				p_dev = priv->p_dev[i];
-				/* add to queue */
-				queue = &p_dev->que;
-				spin_lock_irqsave(&p_dev->qlock, flags);
-				enqueue(queue, &cap_time);
-				spin_unlock_irqrestore(&p_dev->qlock, flags);
-			}
-		}
+	list_for_each_entry(p_dev, &cap->active, list) {
+		/* add to queue */
+		spin_lock_irqsave(&p_dev->qlock, flags);
+		enqueue(&p_dev->que, timestamp);
+		spin_unlock_irqrestore(&p_dev->qlock, flags);
 	}
 
 	return 0;
+}
+
+static u64 mch_ptp_interpolate_timestamps(struct mch_private *priv,
+					  int ch,
+					  u64 base,
+					  u64 target,
+					  u64 diff)
+{
+	u64 timestamp;
+	int loop_cnt = 0;
+
+	timestamp = base;
+
+	while (timestamp + diff + 2000000 < target) {
+		pr_debug("interpolate: %llu %llu %llu\n",
+			 target, timestamp, diff);
+
+		timestamp += diff;
+		mch_ptp_timestamp_enqueue(priv, timestamp, ch);
+
+		loop_cnt++;
+		if (loop_cnt > 15)
+			break;
+	}
+
+	return timestamp;
 }
 
 static void mch_ptp_correct_timestamp(struct mch_private *priv,
@@ -155,57 +155,62 @@ static void mch_ptp_correct_timestamp(struct mch_private *priv,
 				      u64 ptp_timestamp_l32,
 				      u64 ptp_timestamp_l)
 {
+	struct ptp_capture_device *cap;
 	u32 timestamp;
 	u64 timestamp_tmp;
-	u64 cap_timestamp;
+	u64 timestamp_cap;
+	u64 timestamp_cap_pre;
+	u64 timestamp_diff;
 
-	timestamp = priv->timestamp[ch];
+	cap = &priv->cap_dev[ch];
 
-	switch (priv->avtp_cap_status[ch]) {
+	timestamp = cap->timestamp;
+	timestamp_cap_pre = cap->timestamp_cap_pre;
+
+	switch (cap->status) {
 	case AVTP_CAP_STATE_INIT:
-		cap_timestamp = 0;
-		priv->avtp_cap_status[ch] = AVTP_CAP_STATE_UNLOCK;
+		timestamp_cap = 0;
+		cap->status = AVTP_CAP_STATE_UNLOCK;
 		break;
 
 	case AVTP_CAP_STATE_UNLOCK:
 	case AVTP_CAP_STATE_LOCK:
 		timestamp_tmp = (u64)timestamp;
-		if (priv->pre_timestamp[ch] > timestamp)
+		if (cap->timestamp_pre > timestamp)
 			timestamp_tmp += U32_MAX;
 
-		if ((priv->pre_timestamp[ch] <= priv->pre_ptp_timestamp_l32) &&
+		if ((cap->timestamp_pre <= priv->pre_ptp_timestamp_l32) &&
 		    (timestamp_tmp <= ptp_timestamp_l)) {
-			priv->avtp_cap_status[ch] = AVTP_CAP_STATE_LOCK;
+			cap->status = AVTP_CAP_STATE_LOCK;
 			/* ptp precedes avtp_cap */
 			if (ptp_timestamp_l32 >= timestamp) {
-				cap_timestamp = ptp_timestamp_u32 | timestamp;
+				timestamp_cap = ptp_timestamp_u32 | timestamp;
 			} else {
-				cap_timestamp = (ptp_timestamp_u32 - (u64)BIT_ULL(32)) | timestamp;
+				timestamp_cap = (ptp_timestamp_u32 - (u64)BIT_ULL(32)) | timestamp;
 				/* TODO work around */
-				if (cap_timestamp + NSEC < priv->pre_cap_timestamp[ch])
-					cap_timestamp = ptp_timestamp_u32 | timestamp;
+				if (timestamp_cap + NSEC < timestamp_cap_pre)
+					timestamp_cap = ptp_timestamp_u32 | timestamp;
 			}
 
-		} else if ((priv->pre_timestamp[ch] > priv->pre_ptp_timestamp_l32) &&
+		} else if ((cap->timestamp_pre > priv->pre_ptp_timestamp_l32) &&
 			   (timestamp_tmp > ptp_timestamp_l)) {
-			priv->avtp_cap_status[ch] = AVTP_CAP_STATE_LOCK;
+			cap->status = AVTP_CAP_STATE_LOCK;
 			/* avtp_cap precedes ptp */
 			if (ptp_timestamp_l32 <= timestamp) {
-				cap_timestamp = ptp_timestamp_u32 | timestamp;
+				timestamp_cap = ptp_timestamp_u32 | timestamp;
 			} else {
-				cap_timestamp = (ptp_timestamp_u32 + (u64)BIT_ULL(32)) | timestamp;
+				timestamp_cap = (ptp_timestamp_u32 + (u64)BIT_ULL(32)) | timestamp;
 				/* TODO work around */
-				if (cap_timestamp - NSEC > priv->pre_cap_timestamp[ch])
-					cap_timestamp = ptp_timestamp_u32 | timestamp;
+				if (timestamp_cap - NSEC > timestamp_cap_pre)
+					timestamp_cap = ptp_timestamp_u32 | timestamp;
 			}
 		} else {
-			/* TODO : timestamp error */
-			cap_timestamp = 0;
-			priv->avtp_cap_status[ch] = AVTP_CAP_STATE_UNLOCK;
-			pr_info("ptp timestamp unlock\n");
+			timestamp_cap = 0;
+			cap->status = AVTP_CAP_STATE_UNLOCK;
+			pr_debug("ptp timestamp unlock\n");
 			pr_debug("%d\t %u\t %llu\t %llu\t %llu\t%llu\t %u\n",
 				 ch,
-				 priv->pre_timestamp[ch],
+				 cap->timestamp_pre,
 				 priv->pre_ptp_timestamp_l32,
 				 timestamp_tmp,
 				 ptp_timestamp_l,
@@ -215,49 +220,105 @@ static void mch_ptp_correct_timestamp(struct mch_private *priv,
 		break;
 
 	default:
-		cap_timestamp = 0;
-		priv->avtp_cap_status[ch] = AVTP_CAP_STATE_INIT;
+		timestamp_cap = 0;
+		cap->status = AVTP_CAP_STATE_INIT;
+		break;
 	}
 
-	/* check enqueue */
-	if (priv->avtp_cap_status[ch] != AVTP_CAP_STATE_INIT) {
-		if (cap_timestamp < priv->pre_cap_timestamp[ch]) {
-			priv->avtp_cap_status[ch] = AVTP_CAP_STATE_UNLOCK;
-			pr_info("capture timestamp unlock  %llu  %llu\n", cap_timestamp,
-				priv->pre_cap_timestamp[ch]);
-			/* TODO: */
-			priv->pre_cap_timestamp[ch] += priv->timestamp_diff[ch];
-			mch_ptp_timestamp_enqueue(priv,
-						  priv->pre_cap_timestamp[ch], ch);
+	/* check unlock */
+	if (cap->status != AVTP_CAP_STATE_INIT) {
+		if (timestamp_cap < timestamp_cap_pre) {
+			cap->status = AVTP_CAP_STATE_UNLOCK;
+			pr_debug("capture timestamp unlock  %llu  %llu\n",
+				 timestamp_cap, timestamp_cap_pre);
 		}
 	}
 
-	if (priv->avtp_cap_status[ch] == AVTP_CAP_STATE_LOCK) {
-		if (priv->pre_cap_timestamp[ch]) {
-			while (priv->pre_cap_timestamp[ch] + priv->timestamp_diff[ch] + 2000000 < cap_timestamp) {
-				pr_debug("%llu interrupt fail %llu %llu\n", cap_timestamp,
-					 priv->pre_cap_timestamp[ch], priv->timestamp_diff[ch]);
-				/* timestamp jump, interpolation */
-				priv->pre_cap_timestamp[ch] += priv->timestamp_diff[ch];
-				mch_ptp_timestamp_enqueue(priv,
-							  priv->pre_cap_timestamp[ch], ch);
-			}
-			if ((cap_timestamp - priv->pre_cap_timestamp[ch] > priv->timestamp_diff_init - 200000) &&
-			    (cap_timestamp - priv->pre_cap_timestamp[ch] < priv->timestamp_diff_init + 200000))
-				priv->timestamp_diff[ch] = cap_timestamp - priv->pre_cap_timestamp[ch];
+	/* enqueue */
+	if (cap->status == AVTP_CAP_STATE_LOCK) {
+		if (timestamp_cap_pre) {
+			timestamp_diff = cap->timestamp_diff;
+			/* if occurred timestamp jump, interpolate timestamps */
+			timestamp_cap_pre = mch_ptp_interpolate_timestamps(
+					priv,
+					ch,
+					timestamp_cap_pre,
+					timestamp_cap,
+					timestamp_diff);
+
+			timestamp_diff = timestamp_cap - timestamp_cap_pre;
+			if ((timestamp_diff > priv->timestamp_diff_init - 200000) &&
+			    (timestamp_diff < priv->timestamp_diff_init + 200000))
+				cap->timestamp_diff = timestamp_diff;
 		}
 
-		mch_ptp_timestamp_enqueue(priv, cap_timestamp, ch);
-		priv->pre_cap_timestamp[ch] = cap_timestamp;
+		mch_ptp_timestamp_enqueue(priv, timestamp_cap, ch);
 	} else {
-		priv->timestamp_diff[ch] = priv->timestamp_diff_init;
-		priv->pre_cap_timestamp[ch] = 0;
+		cap->timestamp_diff = priv->timestamp_diff_init;
 	}
 
-	priv->pre_timestamp[ch] = timestamp;
+	cap->timestamp_pre = timestamp;
+	cap->timestamp_cap_pre = timestamp_cap;
 }
 
-irqreturn_t mch_ptp_timestamp_interrupt(int irq, void *dev_id)
+static void mch_ptp_capture_attach(struct mch_private *priv, int ch)
+{
+	struct net_device *ndev = priv->ndev;
+	struct ptp_capture_device *cap = &priv->cap_dev[ch];
+
+	if (ch < 0)
+		return;
+
+	if (atomic_inc_return(&cap->attached) == 1) {
+		cap->status = AVTP_CAP_STATE_INIT;
+		cap->timestamp_cap_pre = 0;
+		cap->timestamp_diff = priv->timestamp_diff_init;
+
+		mch_set_adg_avb_sync_sel(priv, ch, priv->param.avtp_clk_name);
+
+		mch_regist_ravb(priv, priv->param.frq,
+				priv->param.avtp_cap_cycle, ch);
+
+		ravb_write(ndev, BIT(17 + ch), GIE);
+	}
+}
+
+static void mch_ptp_capture_detach(struct mch_private *priv, int ch)
+{
+	struct net_device *ndev = priv->ndev;
+	struct ptp_capture_device *cap = &priv->cap_dev[ch];
+
+	if (ch < 0)
+		return;
+
+	if (!atomic_dec_if_positive(&cap->attached))
+		ravb_write(ndev, BIT(17 + ch), GID);
+}
+
+static irqreturn_t mch_ptp_timestamp_interrupt(int irq, void *data)
+{
+	struct mch_private *priv = data;
+	struct net_device *ndev = priv->ndev;
+	irqreturn_t ret = IRQ_NONE;
+	u32 gis = ravb_read(ndev, GIS);
+	u32 timestamp;
+	int i;
+
+	gis &= ravb_read(ndev, GIC);
+	for (i = 0; i < AVTP_CAP_DEVICES; i++) {
+		if (gis & BIT(17 + i)) {
+			timestamp = ravb_read(ndev, GCAT0 + (4 * (i + 1)));
+			priv->cap_dev[i].timestamp = timestamp;
+			set_bit(i, priv->timestamp_irqf);
+			ravb_write(ndev, ~BIT(17 + i), GIS);
+			ret = IRQ_WAKE_THREAD;
+		}
+	}
+
+	return ret;
+}
+
+static irqreturn_t mch_ptp_timestamp_interrupt_th(int irq, void *dev_id)
 {
 	struct mch_private *priv = dev_id;
 	int i;
@@ -284,36 +345,6 @@ irqreturn_t mch_ptp_timestamp_interrupt(int irq, void *dev_id)
 	priv->pre_ptp_timestamp_l32 = ptp_timestamp_l32;
 
 	return IRQ_HANDLED;
-}
-
-static int init_ptp_device(struct ptp_device *p_dev)
-{
-	struct mch_private *priv = p_dev->priv;
-	struct net_device *ndev = priv->ndev;
-	int ch;
-
-	pr_debug("[%s] START\n", __func__);
-
-	p_dev->que.head = 0;
-	p_dev->que.tail = 0;
-	p_dev->que.cnt = 0;
-
-	spin_lock_init(&p_dev->qlock);
-
-	ch = priv->param.avtp_cap_ch;
-
-	priv->avtp_cap_status[ch] = AVTP_CAP_STATE_INIT;
-	priv->pre_cap_timestamp[ch] = 0;
-	priv->timestamp_diff_init = NSEC / priv->param.avtp_cap_cycle;
-	priv->timestamp_diff[ch] = priv->timestamp_diff_init;
-
-	priv->interrupt_enable_cnt[ch]++;
-	if (priv->interrupt_enable_cnt[ch])
-		ravb_write(ndev, BIT(17 + ch), GIE);
-
-	pr_debug("[%s] END\n", __func__);
-
-	return 0;
 }
 
 /*
@@ -349,98 +380,177 @@ EXPORT_SYMBOL(mch_ptp_get_time);
 /*
  * In-Kernel PTP Capture API
  */
-int mch_ptp_open(int *dev_id)
+void *mch_ptp_open(void)
 {
 	struct mch_private *priv = mch_priv_ptr;
-	int i;
-	int ret;
 	struct ptp_device *p_dev = NULL;
 	unsigned long flags;
 
-	*dev_id = -1;
-
-	if (!dev_id)
-		return -EINVAL;
-
 	if (!priv)
-		return -ENODEV;
+		return NULL;
 
 	p_dev = kzalloc(sizeof(*p_dev), GFP_KERNEL);
 	if (!p_dev)
-		return -ENOMEM;
+		return NULL;
 
-	spin_lock_irqsave(&mch_ptp_lock, flags);
-
-	for (i = 0; i < ARRAY_SIZE(priv->p_dev) && priv->p_dev[i]; i++)
-		;
-
-	if (i >= ARRAY_SIZE(priv->p_dev)) {
-		pr_err("cannot register mch_ptp device\n");
-		spin_unlock_irqrestore(&mch_ptp_lock, flags);
-		kfree(p_dev);
-		return -EBUSY;
-	}
-
-	p_dev->dev_id = i;
 	p_dev->priv = priv;
-	priv->p_dev[i] = p_dev;
+	p_dev->que.head = 0;
+	p_dev->que.tail = 0;
+	p_dev->que.max_cnt = -1;
+	p_dev->que.timestamps = NULL;
+	p_dev->capture_ch = AVTP_CAP_CH_INVALID;
+	spin_lock_init(&p_dev->qlock);
 
-	spin_unlock_irqrestore(&mch_ptp_lock, flags);
+	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
+	list_add_tail(&p_dev->list, &priv->ptp_capture_inactive);
+	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 
-	ret = init_ptp_device(p_dev);
+	pr_debug("registered mch_ptp device index=%p\n", p_dev);
 
-	pr_info("registered mch_ptp device index=%d\n", i);
-	*dev_id = i;
-
-	return 0;
+	return (void *)p_dev;
 }
 EXPORT_SYMBOL(mch_ptp_open);
 
-int mch_ptp_close(int dev_id)
+int mch_ptp_close(void *ptp_handle)
 {
-	struct mch_private *priv = mch_priv_ptr;
-	struct net_device *ndev = priv->ndev;
-	struct ptp_device *p_dev;
-	int ch;
+	struct mch_private *priv;
+	struct net_device *ndev;
+	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
 	unsigned long flags;
 
+	if (!ptp_handle)
+		return -EINVAL;
+
+	priv = p_dev->priv;
 	if (!priv)
 		return -ENODEV;
 
-	if ((dev_id < 0) || (dev_id >= PTP_DEVID_MAX))
-		return -EINVAL;
+	ndev = priv->ndev;
 
-	spin_lock_irqsave(&mch_ptp_lock, flags);
+	/* move from active or inactive list */
+	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
+	list_del(&p_dev->list);
+	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 
-	p_dev = priv->p_dev[dev_id];
-	if (!p_dev)
-		return 0;
-	priv->p_dev[dev_id] = NULL;
+	/* capture stop */
+	mch_ptp_capture_detach(priv, p_dev->capture_ch);
 
-	spin_unlock_irqrestore(&mch_ptp_lock, flags);
+	/* free timestamp buffer */
+	kfree(p_dev->que.timestamps);
 
-	ch = priv->param.avtp_cap_ch;
-	priv->interrupt_enable_cnt[ch]--;
-	if (!priv->interrupt_enable_cnt[ch])
-		ravb_write(ndev, BIT(17 + ch), GID);
-
+	/* free ptp device */
 	kfree(p_dev);
 
-	pr_info("close mch_ptp device  index=%d\n", dev_id);
+	pr_debug("close mch_ptp device  index=0x%p\n", p_dev);
 
 	return 0;
 }
 EXPORT_SYMBOL(mch_ptp_close);
 
-int mch_ptp_get_timestamps(int dev_id,
-			   int ch,
-			   int *count,
-			   struct ptp_clock_time timestamps[])
+int mch_ptp_capture_start(void *ptp_handle,
+			  int ch,
+			  int max_count)
+{
+	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
+	struct mch_private *priv;
+	struct net_device *ndev;
+	struct ptp_capture_device *cap;
+	unsigned long flags;
+	int real_ch;
+	void *timestamps;
+
+	if (!ptp_handle)
+		return -EINVAL;
+
+	priv = p_dev->priv;
+	if (!priv)
+		return -ENODEV;
+
+	ndev = priv->ndev;
+
+	if ((ch < AVTP_CAP_CH_MIN) || (ch > AVTP_CAP_CH_MAX))
+		return -EINVAL;
+
+	if (p_dev->que.timestamps)
+		return -EBUSY;
+
+	timestamps = kcalloc(max_count + 1, sizeof(u64), GFP_KERNEL);
+	if (!timestamps)
+		return -ENOMEM;
+
+	real_ch = ch - AVTP_CAP_CH_MIN;
+
+	spin_lock_irqsave(&p_dev->qlock, flags);
+
+	p_dev->que.timestamps = timestamps;
+	p_dev->que.max_cnt = max_count + 1;
+	p_dev->capture_ch = real_ch;
+
+	spin_unlock_irqrestore(&p_dev->qlock, flags);
+
+	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
+
+	/* move from inactive list to active list */
+	cap = &priv->cap_dev[real_ch];
+	list_move_tail(&p_dev->list, &cap->active);
+
+	/* capture start */
+	mch_ptp_capture_attach(priv, real_ch);
+
+	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
+
+	return 0;
+}
+EXPORT_SYMBOL(mch_ptp_capture_start);
+
+int mch_ptp_capture_stop(void *ptp_handle)
+{
+	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
+	struct mch_private *priv;
+	unsigned long flags;
+	void *timestamps;
+
+	if (!ptp_handle)
+		return -EINVAL;
+
+	priv = p_dev->priv;
+	if (!priv)
+		return -ENODEV;
+
+	if (!p_dev->que.timestamps)
+		return -EPERM;
+
+	/* move from active list to inactive list */
+	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
+	list_move_tail(&p_dev->list, &priv->ptp_capture_inactive);
+	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
+
+	/* capture stop */
+	mch_ptp_capture_detach(priv, p_dev->capture_ch);
+
+	/* clear ptp device */
+	spin_lock_irqsave(&p_dev->qlock, flags);
+
+	timestamps = p_dev->que.timestamps;
+	p_dev->que.timestamps = NULL;
+	p_dev->que.max_cnt = -1;
+	p_dev->capture_ch = AVTP_CAP_CH_INVALID;
+
+	spin_unlock_irqrestore(&p_dev->qlock, flags);
+
+	/* free timestamp buffer */
+	kfree(timestamps);
+
+	return 0;
+}
+EXPORT_SYMBOL(mch_ptp_capture_stop);
+
+int mch_ptp_get_timestamps(void *ptp_handle,
+			   int req_count,
+			   u64 *timestamps)
 {
 	struct mch_private *priv = mch_priv_ptr;
-	struct ptp_device *p_dev;
-	struct ptp_queue *queue;
-	struct ptp_clock_time clock_time;
+	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
 	int i;
 	unsigned long flags;
 
@@ -449,32 +559,62 @@ int mch_ptp_get_timestamps(int dev_id,
 	if (!priv)
 		return -ENODEV;
 
-	if ((dev_id < 0) || (dev_id >= PTP_DEVID_MAX))
-		return -EINVAL;
-
-	p_dev = priv->p_dev[dev_id];
 	if (!p_dev)
 		return -EINVAL;
 
+	if (p_dev->capture_ch == AVTP_CAP_CH_INVALID)
+		return -EPERM;
+
 	spin_lock_irqsave(&p_dev->qlock, flags);
 
-	queue = &p_dev->que;
-
-	*count = check_queue(queue);
-	if (*count == 0) {
-		spin_unlock_irqrestore(&p_dev->qlock, flags);
-		return 0;
-	}
-
-	for (i = 0; i < *count; i++) {
-		dequeue(queue, &clock_time);
-		timestamps[i] = clock_time;
-	}
+	for (i = 0; i < req_count; i++)
+		if (dequeue(&p_dev->que, &timestamps[i]) < 0)
+			break;
 
 	spin_unlock_irqrestore(&p_dev->qlock, flags);
 
 	pr_debug("[%s] END\n", __func__);
 
-	return 0;
+	return i;
 }
 EXPORT_SYMBOL(mch_ptp_get_timestamps);
+
+int mch_ptp_capture_init(struct mch_private *priv)
+{
+	struct ptp_capture_device *cap;
+	int err, i;
+
+	err = mch_regist_interrupt(priv,
+				   "ch22",
+				   "multi_A",
+				   mch_ptp_timestamp_interrupt,
+				   mch_ptp_timestamp_interrupt_th);
+	if (err < 0)
+		return err;
+
+	for (i = 0; i < AVTP_CAP_DEVICES; i++) {
+		cap = &priv->cap_dev[i];
+		INIT_LIST_HEAD(&cap->active);
+	}
+	INIT_LIST_HEAD(&priv->ptp_capture_inactive);
+
+	return 0;
+}
+
+int mch_ptp_capture_cleanup(struct mch_private *priv)
+{
+	struct ptp_device *pd, *tmp;
+	struct ptp_capture_device *cap;
+	int i;
+
+	for (i = 0; i < AVTP_CAP_DEVICES; i++) {
+		cap = &priv->cap_dev[i];
+		list_for_each_entry_safe(pd, tmp, &cap->active, list)
+			mch_ptp_close(pd);
+	}
+
+	list_for_each_entry_safe(pd, tmp, &priv->ptp_capture_inactive, list)
+		mch_ptp_close(pd);
+
+	return 0;
+}

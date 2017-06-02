@@ -65,12 +65,16 @@
 #include "ravb_mch.h"
 
 #define MCH_DEVID_MAX    1
-#define PTP_DEVID_MAX    10
-#define MAX_TIMESTAMPS   100
 #define ADG_AVB_OFFSET   0x0100
 #define AVTP_CAP_DEVICES 12
 
 #define q_next(n, max)	(((n) + 1) % (max))
+
+#define AVTP_CAP_CH_MIN     2
+#define AVTP_CAP_CH_MAX     13
+#define AVTP_CAP_CH_INVALID -1
+
+#define NSEC 1000000000UL
 
 enum ADG_AVB_REG {
 	AVBCKR          = 0x0100 - ADG_AVB_OFFSET,
@@ -127,16 +131,27 @@ struct mch_device {
 struct ptp_queue {
 	int head;
 	int tail;
-	int cnt;
-	struct ptp_clock_time timestamps[MAX_TIMESTAMPS];
+	int max_cnt;
+	u64 *timestamps;
 };
 
 struct ptp_device {
-	int                     dev_id;
-	struct mch_private      *priv;
+	struct mch_private	*priv;
 
-	struct ptp_queue        que;
-	spinlock_t              qlock; /* for timetamp queue */
+	int			capture_ch;
+	struct ptp_queue	que;
+	spinlock_t		qlock; /* for timestamp queue */
+	struct list_head	list;
+};
+
+struct ptp_capture_device {
+	enum AVTP_CAP_STATE status;
+	u32 timestamp;
+	u32 timestamp_pre;
+	u64 timestamp_cap_pre;
+	u64 timestamp_diff;
+	atomic_t attached;
+	struct list_head active;
 };
 
 struct mch_private {
@@ -147,23 +162,16 @@ struct mch_private {
 	struct i2c_client *client;
 	struct clk *clk;
 	struct net_device *ndev;
-	DECLARE_BITMAP(timestamp_irqf, AVTP_CAP_DEVICES);
 	int irq;
 
 	struct mch_device *m_dev[MCH_DEVID_MAX];
 
-	enum AVTP_CAP_STATE avtp_cap_status[AVTP_CAP_DEVICES];
-	u32 timestamp[AVTP_CAP_DEVICES];
-	u32 pre_timestamp[AVTP_CAP_DEVICES];
-	u64 pre_cap_timestamp[AVTP_CAP_DEVICES];
+	DECLARE_BITMAP(timestamp_irqf, AVTP_CAP_DEVICES);
+	struct ptp_capture_device cap_dev[AVTP_CAP_DEVICES];
+	struct list_head ptp_capture_inactive;
 	u64 timestamp_diff_init;
-	u64 timestamp_diff[AVTP_CAP_DEVICES];
 	u64 pre_ptp_timestamp_u32;
 	u64 pre_ptp_timestamp_l32;
-
-	int interrupt_enable_cnt[AVTP_CAP_DEVICES];
-
-	struct ptp_device *p_dev[PTP_DEVID_MAX];
 
 	struct mch_param param;
 
@@ -171,9 +179,20 @@ struct mch_private {
 };
 
 /* RAVB */
-irqreturn_t mch_ptp_timestamp_interrupt(int irq, void *dev_id);
+int mch_regist_interrupt(struct mch_private *priv,
+			 const char *ch, const char *name,
+			 irqreturn_t (*func_i)(int, void *),
+			 irqreturn_t (*func_t)(int, void *));
+int mch_regist_ravb(struct mch_private *priv, int freq,
+		    int cap_cycle, int ch);
+
+/* PTP Capture */
+int mch_ptp_capture_init(struct mch_private *priv);
+int mch_ptp_capture_cleanup(struct mch_private *priv);
 
 /* ADG */
+int mch_set_adg_avb_sync_sel(struct mch_private *priv, int ch,
+			     char *clk_name);
 static inline u32 mch_adg_avb_read(struct mch_private *priv,
 				   enum ADG_AVB_REG reg)
 {

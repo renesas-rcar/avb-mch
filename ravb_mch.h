@@ -92,14 +92,19 @@ int mch_ptp_get_time(u64 *ns);
 /*
  * In-Kernel PTP Capture API
  */
-int mch_ptp_open(int *dev_id);
+void *mch_ptp_open(void);
 
-int mch_ptp_close(int dev_id);
+int mch_ptp_close(void *ptp_handle);
 
-int mch_ptp_get_timestamps(int dev_id,
-			   int ch,
-			   int *count,
-			   struct ptp_clock_time timestamps[]);
+int mch_ptp_capture_start(void *ptp_handle,
+			  int ch,
+			  int max_count);
+
+int mch_ptp_capture_stop(void *ptp_handle);
+
+int mch_ptp_get_timestamps(void *ptp_handle,
+			   int req_count,
+			   u64 *timestamps);
 
 #endif /* __KERNEL__ */
 
