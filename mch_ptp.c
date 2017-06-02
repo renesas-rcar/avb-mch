@@ -76,6 +76,7 @@
 extern struct mch_private *mch_priv_ptr;
 
 static DEFINE_SPINLOCK(mch_ptp_cap_lock);
+static DEFINE_SPINLOCK(mch_ptp_timer_lock);
 
 /*
  * PTP Capture
@@ -348,6 +349,92 @@ static irqreturn_t mch_ptp_timestamp_interrupt_th(int irq, void *dev_id)
 }
 
 /*
+ * PTP Compare
+ */
+static int ravb_wait_reg(struct net_device *ndev, enum ravb_reg reg,
+			 u32 mask, u32 value)
+{
+	int i;
+
+	for (i = 0; i < 10000; i++) {
+		if ((ravb_read(ndev, reg) & mask) == value)
+			return 0;
+
+		udelay(5);
+	}
+
+	return -ETIMEDOUT;
+}
+
+/* Caller must hold the lock */
+static int ravb_ptp_update_compare(struct mch_private *priv, int ch, u32 ns)
+{
+	struct net_device *ndev = priv->ndev;
+	/* When the comparison value (GPTC.PTCV) is in range of
+	 * [x-1 to x+1] (x is the configured increment value in
+	 * GTI.TIV), it may happen that a comparison match is
+	 * not detected when the timer wraps around.
+	 */
+	u32 gti_ns_plus_1 = (priv->ptp->current_addend >> 20) + 1;
+	u32 gccr;
+
+	if (ns < gti_ns_plus_1)
+		ns = gti_ns_plus_1;
+	else if (ns > 0 - gti_ns_plus_1)
+		ns = 0 - gti_ns_plus_1;
+
+	if (ravb_wait_reg(ndev, GCCR, GCCR_LPTC, 0))
+		return -ETIMEDOUT;
+
+	ravb_write(ndev, ns, GPTC);
+	gccr = ravb_read(ndev, GCCR);
+
+	gccr &= ~(7 << 20);
+	gccr |= (GCCR_LI_1 + (ch << 20));
+	ravb_write(ndev, gccr | GCCR_LPTC, GCCR);
+
+	return 0;
+}
+
+static irqreturn_t mch_ptp_compare_interrupt(int irq, void *dev_id)
+{
+	struct mch_private *priv = dev_id;
+	struct net_device *ndev = priv->ndev;
+	struct ptp_timer_device *pt_dev;
+	u32 gis = ravb_read(ndev, GIS);
+	u32 period;
+	irqreturn_t result = IRQ_NONE;
+	int ch;
+
+	gis &= ravb_read(ndev, GIC);
+
+	for (ch = 0; ch < MCH_PTP_TIMER_MAX; ch++) {
+		pt_dev = priv->tim_dev[ch];
+		if (gis & BIT(3 + ch)) {
+			if (pt_dev->func)
+				period = pt_dev->func(pt_dev->arg);
+			else
+				period = 0;
+
+			if (period) {
+				pt_dev->time += period;
+				ravb_ptp_update_compare(priv,
+							ch,
+							pt_dev->time);
+			} else {
+				ravb_write(ndev, BIT(3 + ch), GID);
+				pt_dev->status = 0;
+			}
+
+			result = IRQ_HANDLED;
+			ravb_write(ndev, ~BIT(3 + ch), GIS);
+		}
+	}
+
+	return result;
+}
+
+/*
  * public functions
  */
 
@@ -615,6 +702,172 @@ int mch_ptp_capture_cleanup(struct mch_private *priv)
 
 	list_for_each_entry_safe(pd, tmp, &priv->ptp_capture_inactive, list)
 		mch_ptp_close(pd);
+
+	return 0;
+}
+
+/*
+ * In-Kernel PTP Timer API
+ */
+void *mch_ptp_timer_open(u32 (*handler)(void *), void *arg)
+{
+	struct mch_private *priv = mch_priv_ptr;
+	struct ptp_timer_device *pt_dev;
+	unsigned long flags;
+	int ch;
+
+	if (!priv)
+		return NULL;
+
+	pt_dev = kzalloc(sizeof(*pt_dev), GFP_KERNEL);
+	if (!pt_dev)
+		return NULL;
+
+	pt_dev->priv = priv;
+	pt_dev->status = 0;
+	pt_dev->time = 0;
+	pt_dev->arg = arg;
+	pt_dev->func = handler;
+
+	spin_lock_irqsave(&mch_ptp_timer_lock, flags);
+
+	ch = find_first_zero_bit(priv->timer_map, MCH_PTP_TIMER_MAX);
+	if (!(ch < MCH_PTP_TIMER_MAX)) {
+		spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
+		kfree(pt_dev);
+		return NULL;
+	}
+
+	/* register tim_dev table */
+	set_bit(ch, priv->timer_map);
+	pt_dev->ch = ch;
+	priv->tim_dev[ch] = pt_dev;
+
+	spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
+
+	pr_debug("open ptp_timer ch:%d\n", ch);
+
+	return (void *)pt_dev;
+}
+EXPORT_SYMBOL(mch_ptp_timer_open);
+
+int mch_ptp_timer_close(void *timer_handler)
+{
+	struct mch_private *priv;
+	struct ptp_timer_device *pt_dev = timer_handler;
+	struct net_device *ndev;
+	unsigned long flags;
+	int ch;
+
+	if (!pt_dev)
+		return -EINVAL;
+
+	priv = pt_dev->priv;
+	if (!priv)
+		return -ENODEV;
+
+	ndev = priv->ndev;
+
+	spin_lock_irqsave(&mch_ptp_timer_lock, flags);
+
+	/* unregister tim_dev table */
+	ch = pt_dev->ch;
+	ravb_write(ndev, BIT(3 + ch), GID);
+	priv->tim_dev[ch] = NULL;
+	clear_bit(ch, priv->timer_map);
+
+	spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
+
+	kfree(pt_dev);
+
+	return 0;
+}
+EXPORT_SYMBOL(mch_ptp_timer_close);
+
+int mch_ptp_timer_start(void *timer_handler, u32 start)
+{
+	struct mch_private *priv;
+	struct ptp_timer_device *pt_dev = timer_handler;
+	struct net_device *ndev;
+	unsigned long flags;
+	int error = 0;
+
+	if (!pt_dev)
+		return -EINVAL;
+
+	priv = pt_dev->priv;
+	if (!priv)
+		return -ENODEV;
+
+	ndev = priv->ndev;
+
+	if (pt_dev->status)
+		return -EBUSY;
+
+	spin_lock_irqsave(&mch_ptp_timer_lock, flags);
+
+	pt_dev->status = 1;
+	pt_dev->time = start;
+	error = ravb_ptp_update_compare(priv, pt_dev->ch, start);
+	if (!error)
+		ravb_write(ndev, BIT(3 + pt_dev->ch), GIE);
+
+	mmiowb();
+	spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
+
+	return error;
+}
+EXPORT_SYMBOL(mch_ptp_timer_start);
+
+int mch_ptp_timer_cancel(void *timer_handler)
+{
+	int error = 0;
+	struct ptp_timer_device *pt_dev = timer_handler;
+	struct mch_private *priv;
+	unsigned long flags;
+	struct net_device *ndev;
+
+	if (!pt_dev)
+		return -EINVAL;
+
+	priv = pt_dev->priv;
+	if (!priv)
+		return -ENODEV;
+
+	ndev = priv->ndev;
+
+	spin_lock_irqsave(&mch_ptp_timer_lock, flags);
+
+	pt_dev->status = 0;
+	/* Mask interrupt */
+	ravb_write(ndev, BIT(3 + pt_dev->ch), GID);
+
+	mmiowb();
+	spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
+
+	return error;
+}
+EXPORT_SYMBOL(mch_ptp_timer_cancel);
+
+int mch_ptp_timer_init(struct mch_private *priv)
+{
+	int err;
+
+	err = mch_regist_interrupt(priv,
+				   "ch22",
+				   "multi_A_ptp",
+				   mch_ptp_compare_interrupt,
+				   NULL);
+
+	return err;
+}
+
+int mch_ptp_timer_cleanup(struct mch_private *priv)
+{
+	int i;
+
+	for (i = 0; i < MCH_PTP_TIMER_MAX; i++)
+		mch_ptp_timer_close(priv->tim_dev[i]);
 
 	return 0;
 }

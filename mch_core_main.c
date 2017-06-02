@@ -974,6 +974,9 @@ static int mch_unregist_ravb(struct mch_private *priv)
 		ravb_write(ndev, BIT(17 + i), GID);
 	}
 
+	for (i = 0; i < MCH_PTP_TIMER_MAX; i++)
+		ravb_write(ndev, BIT(3 + i), GID);
+
 	return 0;
 }
 
@@ -1091,6 +1094,11 @@ static int mch_probe(struct platform_device *pdev)
 	if (err < 0)
 		goto out_release;
 
+	/* MCH PTP Timer device initialize */
+	err = mch_ptp_timer_init(priv);
+	if (err < 0)
+		goto out_release;
+
 	priv->adg_avb_addr = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(priv->adg_avb_addr)) {
 		err = PTR_ERR(priv->adg_avb_addr);
@@ -1179,6 +1187,9 @@ static int mch_remove(struct platform_device *pdev)
 
 	/* In-Kernel API close */
 	mch_close(priv->m_dev[0]);
+
+	/* MCH PTP Timer cleanup */
+	mch_ptp_timer_cleanup(priv);
 
 	/* MCH PTP Capture cleanup */
 	mch_ptp_capture_cleanup(priv);

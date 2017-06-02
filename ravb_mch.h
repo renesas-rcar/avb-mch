@@ -106,6 +106,17 @@ int mch_ptp_get_timestamps(void *ptp_handle,
 			   int req_count,
 			   u64 *timestamps);
 
+/*
+ * In-Kernel PTP Timer API
+ */
+void *mch_ptp_timer_open(u32 (*handler)(void *), void *priv);
+
+int mch_ptp_timer_close(void *timer_handle);
+
+int mch_ptp_timer_start(void *timer_handle, u32 start);
+
+int mch_ptp_timer_cancel(void *timer_handle);
+
 #endif /* __KERNEL__ */
 
 #endif /* __RAVB_MCH_H__ */

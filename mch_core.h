@@ -64,15 +64,22 @@
 
 #include "ravb_mch.h"
 
-#define MCH_DEVID_MAX    1
+#define MCH_DEVID_MAX     1
+#define MCH_PTP_TIMER_MAX 7
 #define ADG_AVB_OFFSET   0x0100
 #define AVTP_CAP_DEVICES 12
 
-#define q_next(n, max)	(((n) + 1) % (max))
+#define GIS_PTMF1 0x00000008
+#define GCCR_LI_1 0x00100000
+
+#define q_next(n, max) (((n) + 1) % (max))
 
 #define AVTP_CAP_CH_MIN     2
 #define AVTP_CAP_CH_MAX     13
 #define AVTP_CAP_CH_INVALID -1
+
+#define PTP_TIMER_CH_MIN  1
+#define PTP_TIMER_CH_MAX  7
 
 #define NSEC 1000000000UL
 
@@ -144,6 +151,16 @@ struct ptp_device {
 	struct list_head	list;
 };
 
+struct ptp_timer_device {
+	struct mch_private      *priv;
+
+	int			status; /* 0:inactive, 1:active */
+	int			ch;
+	u32			time;
+	void			*arg;
+	u32			(*func)(void *);
+};
+
 struct ptp_capture_device {
 	enum AVTP_CAP_STATE status;
 	u32 timestamp;
@@ -165,6 +182,9 @@ struct mch_private {
 	int irq;
 
 	struct mch_device *m_dev[MCH_DEVID_MAX];
+
+	DECLARE_BITMAP(timer_map, MCH_PTP_TIMER_MAX);
+	struct ptp_timer_device *tim_dev[MCH_PTP_TIMER_MAX];
 
 	DECLARE_BITMAP(timestamp_irqf, AVTP_CAP_DEVICES);
 	struct ptp_capture_device cap_dev[AVTP_CAP_DEVICES];
@@ -189,6 +209,10 @@ int mch_regist_ravb(struct mch_private *priv, int freq,
 /* PTP Capture */
 int mch_ptp_capture_init(struct mch_private *priv);
 int mch_ptp_capture_cleanup(struct mch_private *priv);
+
+/* PTP Timer */
+int mch_ptp_timer_init(struct mch_private *priv);
+int mch_ptp_timer_cleanup(struct mch_private *priv);
 
 /* ADG */
 int mch_set_adg_avb_sync_sel(struct mch_private *priv, int ch,
