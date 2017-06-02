@@ -101,29 +101,27 @@ struct mch_param {
 	int avtp_cap_cycle;
 	char avtp_clk_name[32];
 	int avtp_clk_frq;
+	u32 frq;
 	int sample_rate;
 };
 
-struct mch_queue {
-	int head;
-	int tail;
-	int cnt;
-	unsigned int master_timestamps[MAX_TIMESTAMPS];
-	unsigned int device_timestamps[MAX_TIMESTAMPS];
-	int rate[MAX_TIMESTAMPS];
+struct mch_timestamps {
+	struct list_head list;
+	int count;
+	struct mch_timestamp *ts;
 };
 
 struct mch_device {
-	int                     dev_id;
-	struct mch_private      *priv;
+	struct mch_private	*priv;
 
-	struct mch_queue        que;
-	spinlock_t              qlock; /* for timetamp queue */
+	spinlock_t		qlock; /* for timestamp queue */
 
-	u32                     pendingEvents;
-	wait_queue_head_t       waitEvent;
-	struct task_struct      *task;
-	int                     correct;
+	u32			pending_events;
+	wait_queue_head_t	wait_event;
+	struct task_struct	*task;
+	int			correct;
+	u32			interval;
+	struct list_head	timestamps;
 };
 
 struct ptp_queue {
@@ -151,6 +149,9 @@ struct mch_private {
 	struct net_device *ndev;
 	DECLARE_BITMAP(timestamp_irqf, AVTP_CAP_DEVICES);
 	int irq;
+
+	struct mch_device *m_dev[MCH_DEVID_MAX];
+
 	enum AVTP_CAP_STATE avtp_cap_status[AVTP_CAP_DEVICES];
 	u32 timestamp[AVTP_CAP_DEVICES];
 	u32 pre_timestamp[AVTP_CAP_DEVICES];
@@ -162,10 +163,11 @@ struct mch_private {
 
 	int interrupt_enable_cnt[AVTP_CAP_DEVICES];
 
-	struct mch_device *m_dev[MCH_DEVID_MAX];
 	struct ptp_device *p_dev[PTP_DEVID_MAX];
 
 	struct mch_param param;
+
+	struct ravb_ptp *ptp;
 };
 
 /* RAVB */

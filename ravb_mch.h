@@ -67,17 +67,22 @@
 /*
  * In-Kernel API
  */
-int mch_open(int *dev_id);
+struct mch_timestamp {
+	u32 master;
+	u32 device;
+};
 
-int mch_close(int dev_id);
+void *mch_open(void);
 
-int mch_send_timestamps(int dev_id, int time_rate_ns,
-			int master_count,
-			unsigned int master_timestamps[],
-			int device_count,
-			unsigned int device_timestamps[]);
+int mch_close(void *mch);
 
-int mch_get_recovery_value(int dev_id, int *value);
+int mch_set_interval(void *mch, u32 ns);
+
+int mch_send_timestamps(void *mch,
+			struct mch_timestamp *ts,
+			int count);
+
+int mch_get_recovery_value(void *mch, int *value);
 
 /*
  * In-Kernel PTP API

@@ -69,6 +69,7 @@
 #include <linux/clk.h>
 #include <linux/i2c.h>
 #include <linux/kthread.h>
+#include <linux/list.h>
 #include <../drivers/net/ethernet/renesas/ravb.h>
 #include "mch_core.h"
 
@@ -182,56 +183,6 @@ static DEFINE_SPINLOCK(mch_lock);
 static u32 get_avtp_cap_sync_sel_by_name(const char *name);
 static u32 calc_avb_counter(u32 frq);
 
-static int mch_enqueue(struct mch_queue *que, unsigned int master_timestamp,
-		       unsigned int device_timestamp, int rate)
-{
-	if (q_next(que->tail, MAX_TIMESTAMPS) == que->head)
-		que->head = q_next(que->head, MAX_TIMESTAMPS);
-
-	que->master_timestamps[que->tail] = master_timestamp;
-	que->device_timestamps[que->tail] = device_timestamp;
-	que->rate[que->tail] = rate;
-
-	que->tail = q_next(que->tail, MAX_TIMESTAMPS);
-
-	if (que->cnt < MAX_TIMESTAMPS)
-		que->cnt++;
-
-	return 0;
-}
-
-static int mch_dequeue(struct mch_queue *que, unsigned int *master_timestamp,
-		       unsigned int *device_timestamp, int *rate)
-{
-	if (que->head == que->tail)
-		return -1;
-
-	*master_timestamp = que->master_timestamps[que->head];
-	*device_timestamp = que->device_timestamps[que->head];
-	*rate = que->rate[que->head];
-
-	que->head = q_next(que->head, MAX_TIMESTAMPS);
-
-	if (!que->cnt)
-		que->cnt--;
-
-	return 0;
-}
-
-static int mch_check_queue(struct mch_queue *que)
-{
-	int ret;
-
-	if (que->tail > que->head)
-		ret = que->tail - que->head;
-	else if (que->tail < que->head)
-		ret = (que->tail + MAX_TIMESTAMPS) - que->head;
-	else /* if (que->head == que->tail) */
-		ret = 0;
-
-	return ret;
-}
-
 static int mch_clk_correct(struct mch_device *m_dev, s64 diff)
 {
 	struct mch_private *priv = m_dev->priv;
@@ -285,80 +236,83 @@ static int mch_task(void *param)
 {
 	struct mch_device *m_dev = param;
 	struct mch_private *priv;
-	int ret;
+	struct mch_timestamps *ts;
 	unsigned int master_time = 0, device_time = 0;
-	int i, diff_cnt;
-	unsigned int rate;
 	u64 pre_m_time, pre_d_time;
 	u64 guess_m_time, guess_d_time;
 	s64 m_tmp, d_tmp;
-	unsigned long flags;
-	int count, thin_out;
 	s64 diff, diff_ave, pre_diff;
+	int ret;
+	int i, diff_cnt;
+	unsigned long flags;
+	u32 events;
 
-	pr_info("create mch task\n");
+	pr_debug("create mch task\n");
 	priv = m_dev->priv;
 
 	while (!kthread_should_stop()) {
-		ret = wait_event_interruptible(m_dev->waitEvent,
-					       m_dev->pendingEvents);
+		if (list_empty(&m_dev->timestamps))
+			ret = wait_event_interruptible(m_dev->wait_event,
+						       m_dev->pending_events);
+		else
+			ret = 0;
 
 		pr_debug("mch task run\n");
-		m_dev->pendingEvents = TASK_EVENT_NONE;
+		events = m_dev->pending_events;
+		m_dev->pending_events = TASK_EVENT_NONE;
 
 		if (ret < 0) {
 			pr_err("wait_event error\n");
 			continue;
 		}
 
-		if (m_dev->pendingEvents & TASK_EVENT_TERM) {
-			pr_info("mch task terminate\n");
+		if (events & TASK_EVENT_TERM) {
+			pr_debug("mch task terminate\n");
 			/* restore clock correction */
 			diff_ave = 0;
 			mch_clk_correct(m_dev, diff_ave);
 			break;
 		}
 
-		spin_lock_irqsave(&m_dev->qlock, flags);
-		count = mch_check_queue(&m_dev->que);
-		spin_unlock_irqrestore(&m_dev->qlock, flags);
+		pr_debug("mch task proc\n");
 
-		if (count < 2)
+		spin_lock_irqsave(&mch_lock, flags);
+
+		ts = list_first_entry_or_null(&m_dev->timestamps,
+					      struct mch_timestamps,
+					      list);
+		if (ts)
+			list_del(&ts->list);
+
+		spin_unlock_irqrestore(&mch_lock, flags);
+
+		if (!ts) {
+			pr_err("wait_event error\n");
 			continue;
+		}
 
-		spin_lock_irqsave(&m_dev->qlock, flags);
-		ret = mch_dequeue(&m_dev->que, &master_time,
-				  &device_time, &rate);
-		spin_unlock_irqrestore(&m_dev->qlock, flags);
-
-		pre_m_time = master_time;
-		pre_d_time = device_time;
+		pre_m_time = ts->ts[0].master;
+		pre_d_time = ts->ts[0].device;
 
 		diff = 0;
 		diff_ave = 0;
 		pre_diff = 0;
 		diff_cnt = 0;
-		for (i = 1; i < count; i++) {
-			if (m_dev->pendingEvents & TASK_EVENT_TERM) {
-				pr_info("mch task terminate req\n");
-				diff_ave = 0;       /* restore clock correction */
+
+		pr_debug("task loop start ts:%p count(%d)\n", ts, ts->count);
+
+		for (i = 1; i < ts->count; i++) {
+			if (m_dev->pending_events & TASK_EVENT_TERM) {
+				pr_debug("mch task terminate req\n");
+				diff_ave = 0;   /* restore clock correction */
 				break;
 			}
 
-			spin_lock_irqsave(&m_dev->qlock, flags);
-			ret = mch_dequeue(&m_dev->que, &master_time,
-					  &device_time, &rate);
-			spin_unlock_irqrestore(&m_dev->qlock, flags);
+			master_time = ts->ts[i].master;
+			device_time = ts->ts[i].device;
 
-			if (ret < 0)
-				break;
-
-			thin_out = MCH_CORRECT_CYCLE / rate;
-			if (!thin_out)
-				thin_out = 1;
-
-			guess_m_time = pre_m_time + (rate * thin_out);
-			guess_d_time = pre_d_time + (rate * thin_out);
+			guess_m_time = pre_m_time + m_dev->interval;
+			guess_d_time = pre_d_time + m_dev->interval;
 
 			m_tmp = master_time;
 			if (master_time < pre_m_time)	/* wrap around */
@@ -407,9 +361,14 @@ static int mch_task(void *param)
 			pre_m_time = master_time;
 			pre_d_time = device_time;
 		}
+
 		if (diff_cnt)
 			diff_ave /= diff_cnt;
+
 		mch_clk_correct(m_dev, diff_ave);
+
+		kfree(ts->ts);
+		kfree(ts);
 	}
 
 	pr_debug("mch task end\n");
@@ -421,16 +380,14 @@ static int init_mch_device(struct mch_device *m_dev)
 {
 	char taskname[32] = { '\0' };
 
-	m_dev->que.head = 0;
-	m_dev->que.tail = 0;
-	m_dev->que.cnt = 0;
-
-	init_waitqueue_head(&m_dev->waitEvent);
+	init_waitqueue_head(&m_dev->wait_event);
 	spin_lock_init(&m_dev->qlock);
+
+	INIT_LIST_HEAD(&m_dev->timestamps);
 
 	m_dev->correct = 0;
 
-	sprintf(taskname, "mch_task_%d", m_dev->dev_id);
+	sprintf(taskname, "mch_task");
 	m_dev->task = kthread_run(mch_task, m_dev, taskname);
 
 	return 0;
@@ -439,135 +396,138 @@ static int init_mch_device(struct mch_device *m_dev)
 /*
  * public functions
  */
-int mch_open(int *dev_id)
+void *mch_open(void)
 {
 	struct mch_private *priv = mch_priv_ptr;
 	struct mch_device *m_dev = NULL;
-	int i, ret;
+	int ret;
 	unsigned long flags;
 
-	*dev_id = -1;
-
-	if (!dev_id)
-		return -EINVAL;
-
 	if (!priv)
-		return -ENODEV;
+		return NULL;
 
-	m_dev = vzalloc(sizeof(*m_dev));
+	if (priv->m_dev[0])
+		return NULL;
+
+	m_dev = kzalloc(sizeof(*m_dev), GFP_KERNEL);
 	if (!m_dev)
-		return -ENOMEM;
+		return NULL;
 
 	spin_lock_irqsave(&mch_lock, flags);
 
-	for (i = 0; i < ARRAY_SIZE(priv->m_dev) && priv->m_dev[i]; i++)
-		;
-
-	if (i >= ARRAY_SIZE(priv->m_dev)) {
-		pr_err("cannot register mch device\n");
-		spin_unlock_irqrestore(&mch_lock, flags);
-		kfree(m_dev);
-		return -EBUSY;
-	}
-
-	m_dev->dev_id = i;
 	m_dev->priv = priv;
-	priv->m_dev[i] = m_dev;
+	priv->m_dev[0] = m_dev;
 
 	spin_unlock_irqrestore(&mch_lock, flags);
 
 	ret = init_mch_device(m_dev);
 
-	pr_info("registered mch device index=%d\n", i);
+	pr_info("registered mch device %p\n", m_dev);
 
-	*dev_id = i;
-
-	return 0;
+	return (void *)m_dev;
 }
 EXPORT_SYMBOL(mch_open);
 
-int mch_close(int dev_id)
+int mch_close(void *mch)
 {
-	struct mch_private *priv = mch_priv_ptr;
-	struct mch_device *m_dev;
+	struct mch_private *priv;
+	struct mch_device *m_dev = (struct mch_device *)mch;
 	unsigned long flags;
+	struct mch_timestamps *ts, *tmp;
 
+	if (!m_dev)
+		return -EINVAL;
+
+	priv = m_dev->priv;
 	if (!priv)
 		return -ENODEV;
 
-	if ((dev_id < 0) || (dev_id >= MCH_DEVID_MAX))
-		return -EINVAL;
+	m_dev->pending_events = TASK_EVENT_TERM;
+	wake_up_interruptible(&m_dev->wait_event);
+	kthread_stop(m_dev->task);
 
 	spin_lock_irqsave(&mch_lock, flags);
 
-	m_dev = priv->m_dev[dev_id];
-	if (!m_dev)
-		return 0;
-	priv->m_dev[dev_id] = NULL;
+	list_for_each_entry_safe(ts, tmp, &m_dev->timestamps, list) {
+		list_del(&ts->list);
+		kfree(ts->ts);
+		kfree(ts);
+	}
+
+	kfree(m_dev);
+
+	priv->m_dev[0] = NULL;
 
 	spin_unlock_irqrestore(&mch_lock, flags);
 
-	m_dev->pendingEvents = TASK_EVENT_TERM;
-	kthread_stop(m_dev->task);
-
-	vfree(m_dev);
-
-	pr_info("close mch device  index=%d\n", dev_id);
+	pr_info("close mch device\n");
 
 	return 0;
 }
 EXPORT_SYMBOL(mch_close);
 
-int mch_send_timestamps(int dev_id, int time_rate_ns,
-			int master_count,
-			unsigned int master_timestamps[],
-			int device_count,
-			unsigned int device_timestamps[])
+int mch_set_interval(void *mch, u32 ns)
 {
-	struct mch_private *priv = mch_priv_ptr;
-	struct mch_device *m_dev;
+	struct mch_device *m_dev = (struct mch_device *)mch;
+
+	if (!m_dev)
+		return -EINVAL;
+
+	m_dev->interval = ns;
+
+	return 0;
+}
+EXPORT_SYMBOL(mch_set_interval);
+
+int mch_send_timestamps(void *mch,
+			struct mch_timestamp *ts,
+			int count)
+{
+	struct mch_private *priv;
+	struct mch_device *m_dev = (struct mch_device *)mch;
+	struct mch_timestamps *timestamps;
 	int i;
-	int count;
-	int thin_out;
 	unsigned long flags;
 
-	pr_debug("%s count %d,%d\n", __func__,
-		 master_count, device_count);
-
-	if ((dev_id < 0) || (dev_id >= MCH_DEVID_MAX))
+	if (!m_dev)
 		return -EINVAL;
+
+	priv = m_dev->priv;
 
 	if (!priv)
 		return -ENODEV;
 
-	m_dev = priv->m_dev[dev_id];
-	if (!m_dev)
-		return -ENODEV;
+	if (!m_dev->interval)
+		return -EPERM;
 
-	spin_lock_irqsave(&m_dev->qlock, flags);
+	if (count < 1)
+		return -EINVAL;
 
-	if (master_count >= device_count)
-		count = device_count;
-	else
-		count = master_count;
+	timestamps = kzalloc(sizeof(*timestamps), GFP_KERNEL);
+	if (!timestamps)
+		return -ENOMEM;
 
-	thin_out = MCH_CORRECT_CYCLE / time_rate_ns;
-	if (!thin_out)
-		thin_out = 1;
-
-	for (i = 0; i < count; i += thin_out)
-		mch_enqueue(&m_dev->que,
-			    master_timestamps[i],
-			    device_timestamps[i],
-			    time_rate_ns);
-
-	if (count > 1) {
-		pr_debug("mch_task wakeup req\n");
-		m_dev->pendingEvents |= TASK_EVENT_PROC;
-		wake_up_interruptible(&m_dev->waitEvent);
+	timestamps->ts = kcalloc(count, sizeof(*timestamps->ts),
+				 GFP_KERNEL);
+	if (!timestamps->ts) {
+		kfree(timestamps);
+		return -ENOMEM;
 	}
 
-	spin_unlock_irqrestore(&m_dev->qlock, flags);
+	for (i = 0; i < count; i++)
+		timestamps->ts[i] = ts[i];
+	timestamps->count = count;
+
+	pr_debug("send ts addr : %p\n", timestamps);
+	pr_debug("copy-timestamp count(%d)\n", count);
+
+	spin_lock_irqsave(&mch_lock, flags);
+	list_add_tail(&timestamps->list, &m_dev->timestamps);
+	spin_unlock_irqrestore(&mch_lock, flags);
+
+	pr_debug("mch_task wakeup req\n");
+	m_dev->pending_events |= TASK_EVENT_PROC;
+	wake_up_interruptible(&m_dev->wait_event);
 
 	pr_debug("%s count %d\n", __func__, count);
 
@@ -575,9 +535,9 @@ int mch_send_timestamps(int dev_id, int time_rate_ns,
 }
 EXPORT_SYMBOL(mch_send_timestamps);
 
-int mch_get_recovery_value(int dev_id, int *value)
+int mch_get_recovery_value(void *mch, int *value)
 {
-	if ((dev_id < 0) || (dev_id >= MCH_DEVID_MAX))
+	if (!mch)
 		return -EINVAL;
 
 	if (!value)
@@ -964,6 +924,7 @@ MODULE_DEVICE_TABLE(of, net_device_match_table);
 static int mch_get_net_device_handle(struct mch_private *priv)
 {
 	struct net_device *ndev = dev_get_by_name(&init_net, interface);
+	struct ravb_private *ndev_priv;
 	struct device *pdev_dev;
 	const struct of_device_id *match;
 
@@ -981,6 +942,9 @@ static int mch_get_net_device_handle(struct mch_private *priv)
 	}
 
 	priv->ndev = ndev;
+
+	ndev_priv = netdev_priv(priv->ndev);
+	priv->ptp = &ndev_priv->ptp;
 
 	return 0;
 }
@@ -1097,8 +1061,8 @@ static int mch_probe(struct platform_device *pdev)
 	struct mch_private *priv;
 	struct resource *res;
 	struct clk *clk;
-	u32 frq;
 	struct mch_param *param;
+	int i;
 
 	dev_info(&pdev->dev, "probe: start\n");
 
@@ -1132,6 +1096,13 @@ static int mch_probe(struct platform_device *pdev)
 	priv->dev = &pdev->dev;
 	priv->dev->release = mch_release;
 	dev_set_drvdata(&pdev->dev, priv);
+
+	err = mch_get_net_device_handle(priv);
+	if (err < 0)
+		goto out_release;
+
+	for (i = 0; i < MCH_DEVID_MAX; i++)
+		priv->m_dev[i] = NULL;
 
 	priv->adg_avb_addr = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(priv->adg_avb_addr)) {
@@ -1167,10 +1138,6 @@ static int mch_probe(struct platform_device *pdev)
 
 	memcpy(cs2000_data, cs2000_data_bk, sizeof(cs2000_data));
 
-	err = mch_get_net_device_handle(priv);
-	if (err < 0)
-		goto out_release;
-
 	err = mch_regist_interrupt(priv, "ch22", "multi_A");
 	if (err < 0)
 		goto out_release;
@@ -1178,13 +1145,13 @@ static int mch_probe(struct platform_device *pdev)
 	/* register initialize for ADG */
 	mch_regist_adg(priv);
 
-	frq = mch_set_adg_avb_clk_div(priv,
-				      param->avtp_clk_frq,
-				      param->avtp_clk_name);
-	pr_debug("%s Frequency %u\n", param->avtp_clk_name, frq);
+	param->frq = mch_set_adg_avb_clk_div(priv,
+					     param->avtp_clk_frq,
+					     param->avtp_clk_name);
+	pr_debug("%s Frequency %u\n", param->avtp_clk_name, param->frq);
 
 	mch_set_adg_avb_sync_div(priv,
-				 frq,
+				 param->frq,
 				 param->avtp_cap_cycle,
 				 param->avtp_clk_name);
 	mch_set_adg_avb_sync_sel(priv,
@@ -1194,12 +1161,12 @@ static int mch_probe(struct platform_device *pdev)
 	mch_set_adg_avbckr(priv, param->avtp_clk_name);
 
 	/* register initialize for RAVB */
-	mch_regist_ravb(priv, frq,
+	mch_regist_ravb(priv, param->frq,
 			param->avtp_cap_cycle,
 			param->avtp_cap_ch);
 
 	/* CS2000-cp initialize */
-	mch_set_cs2000(priv, 24576000, frq);
+	mch_set_cs2000(priv, 24576000, param->frq);
 
 	dev_info(&pdev->dev, "probe: success\n");
 
@@ -1234,6 +1201,9 @@ static int mch_remove(struct platform_device *pdev)
 
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+
+	/* In-Kernel API close */
+	mch_close(priv->m_dev[0]);
 
 	mch_priv_ptr = NULL;
 	vfree(priv);
