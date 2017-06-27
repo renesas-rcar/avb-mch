@@ -496,6 +496,9 @@ int mch_send_timestamps(void *mch,
 	if (count < 1)
 		return -EINVAL;
 
+	if (!ts)
+		return -EINVAL;
+
 	timestamps = kzalloc(sizeof(*timestamps), GFP_KERNEL);
 	if (!timestamps)
 		return -ENOMEM;
