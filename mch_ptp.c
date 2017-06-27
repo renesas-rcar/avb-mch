@@ -451,6 +451,9 @@ int mch_ptp_get_time(u64 *ns)
 	if (!priv)
 		return -ENODEV;
 
+	if (!ns)
+		return -EINVAL;
+
 	ndev_priv = netdev_priv(priv->ndev);
 	ptp = &ndev_priv->ptp.info;
 
@@ -561,6 +564,9 @@ int mch_ptp_capture_start(void *ptp_handle,
 	if (p_dev->que.timestamps)
 		return -EBUSY;
 
+	if (max_count < 1)
+		return -EINVAL;
+
 	timestamps = kcalloc(max_count + 1, sizeof(u64), GFP_KERNEL);
 	if (!timestamps)
 		return -ENOMEM;
@@ -647,6 +653,9 @@ int mch_ptp_get_timestamps(void *ptp_handle,
 		return -ENODEV;
 
 	if (!p_dev)
+		return -EINVAL;
+
+	if (!timestamps)
 		return -EINVAL;
 
 	if (p_dev->capture_ch == AVTP_CAP_CH_INVALID)
