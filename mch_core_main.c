@@ -210,10 +210,7 @@ static int mch_clk_correct(struct mch_device *m_dev, s64 diff)
 
 	if (m_dev->correct != correct) {
 		val = calc_avb_counter(priv->param.avtp_clk_frq);
-		if (correct == 0)
-			val -= m_dev->correct;
-		else
-			val += correct;
+		val += correct;
 
 		pr_debug("clk correct %d to %d MCH freq (%u)  avb_counter (%08x)\n",
 			 m_dev->correct, correct,
