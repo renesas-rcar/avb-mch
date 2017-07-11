@@ -818,8 +818,10 @@ int mch_ptp_timer_start(void *timer_handler, u32 start)
 	pt_dev->status = 1;
 	pt_dev->time = start;
 	error = ravb_ptp_update_compare(priv, pt_dev->ch, start);
-	if (!error)
+	if (!error) {
+		ravb_write(ndev, ~BIT(3 + pt_dev->ch), GIS);
 		ravb_write(ndev, BIT(3 + pt_dev->ch), GIE);
+	}
 
 	mmiowb();
 	spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
