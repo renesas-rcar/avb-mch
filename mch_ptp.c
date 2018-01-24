@@ -504,7 +504,6 @@ EXPORT_SYMBOL(mch_ptp_open);
 int mch_ptp_close(void *ptp_handle)
 {
 	struct mch_private *priv;
-	struct net_device *ndev;
 	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
 	unsigned long flags;
 
@@ -514,8 +513,6 @@ int mch_ptp_close(void *ptp_handle)
 	priv = p_dev->priv;
 	if (!priv)
 		return -ENODEV;
-
-	ndev = priv->ndev;
 
 	/* move from active or inactive list */
 	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
@@ -543,7 +540,6 @@ int mch_ptp_capture_start(void *ptp_handle,
 {
 	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
 	struct mch_private *priv;
-	struct net_device *ndev;
 	struct ptp_capture_device *cap;
 	unsigned long flags;
 	int real_ch;
@@ -555,8 +551,6 @@ int mch_ptp_capture_start(void *ptp_handle,
 	priv = p_dev->priv;
 	if (!priv)
 		return -ENODEV;
-
-	ndev = priv->ndev;
 
 	if ((ch < AVTP_CAP_CH_MIN) || (ch > AVTP_CAP_CH_MAX))
 		return -EINVAL;
