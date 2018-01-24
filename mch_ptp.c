@@ -326,8 +326,8 @@ static irqreturn_t mch_ptp_timestamp_interrupt_th(int irq, void *dev_id)
 	u64 ptp_timestamp_l;
 
 	mch_ptp_get_time(&ptp_timestamp);
-	ptp_timestamp_u32 = ptp_timestamp & 0xffffffff00000000;
-	ptp_timestamp_l32 = ptp_timestamp & 0x00000000ffffffff;
+	ptp_timestamp_u32 = ptp_timestamp & 0xffffffff00000000UL;
+	ptp_timestamp_l32 = ptp_timestamp & 0x00000000ffffffffUL;
 	ptp_timestamp_l   = ptp_timestamp_l32;
 
 	if (priv->pre_ptp_timestamp_l32 > ptp_timestamp_l)
