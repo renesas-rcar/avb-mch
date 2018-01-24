@@ -73,8 +73,6 @@
 
 #include "mch_core.h"
 
-extern struct mch_private *mch_priv_ptr;
-
 static DEFINE_SPINLOCK(mch_ptp_cap_lock);
 static DEFINE_SPINLOCK(mch_ptp_timer_lock);
 
