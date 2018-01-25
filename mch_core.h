@@ -198,6 +198,8 @@ struct mch_private {
 	struct ravb_ptp *ptp;
 };
 
+extern struct mch_private *mch_priv_ptr;
+
 /* RAVB */
 int mch_regist_interrupt(struct mch_private *priv,
 			 const char *ch, const char *name,

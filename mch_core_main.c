@@ -225,7 +225,6 @@ static int mch_clk_correct(struct mch_device *m_dev, s64 diff)
 static int mch_task(void *param)
 {
 	struct mch_device *m_dev = param;
-	struct mch_private *priv;
 	struct mch_timestamps *ts;
 	unsigned int master_time = 0, device_time = 0;
 	u64 pre_m_time, pre_d_time;
@@ -238,7 +237,6 @@ static int mch_task(void *param)
 	u32 events;
 
 	pr_debug("create mch task\n");
-	priv = m_dev->priv;
 
 	while (!kthread_should_stop()) {
 		if (list_empty(&m_dev->timestamps))
@@ -379,6 +377,8 @@ static int init_mch_device(struct mch_device *m_dev)
 
 	sprintf(taskname, "mch_task");
 	m_dev->task = kthread_run(mch_task, m_dev, taskname);
+	if (IS_ERR(m_dev->task))
+		return -1;
 
 	return 0;
 }
@@ -390,7 +390,6 @@ void *mch_open(void)
 {
 	struct mch_private *priv = mch_priv_ptr;
 	struct mch_device *m_dev = NULL;
-	int ret;
 	unsigned long flags;
 
 	if (!priv)
@@ -403,14 +402,17 @@ void *mch_open(void)
 	if (!m_dev)
 		return NULL;
 
+	if (init_mch_device(m_dev)) {
+		kfree(m_dev);
+		return NULL;
+	}
+
 	spin_lock_irqsave(&mch_lock, flags);
 
 	m_dev->priv = priv;
 	priv->m_dev[0] = m_dev;
 
 	spin_unlock_irqrestore(&mch_lock, flags);
-
-	ret = init_mch_device(m_dev);
 
 	pr_info("registered mch device %p\n", m_dev);
 

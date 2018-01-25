@@ -73,8 +73,6 @@
 
 #include "mch_core.h"
 
-extern struct mch_private *mch_priv_ptr;
-
 static DEFINE_SPINLOCK(mch_ptp_cap_lock);
 static DEFINE_SPINLOCK(mch_ptp_timer_lock);
 
@@ -328,8 +326,8 @@ static irqreturn_t mch_ptp_timestamp_interrupt_th(int irq, void *dev_id)
 	u64 ptp_timestamp_l;
 
 	mch_ptp_get_time(&ptp_timestamp);
-	ptp_timestamp_u32 = ptp_timestamp & 0xffffffff00000000;
-	ptp_timestamp_l32 = ptp_timestamp & 0x00000000ffffffff;
+	ptp_timestamp_u32 = ptp_timestamp & 0xffffffff00000000UL;
+	ptp_timestamp_l32 = ptp_timestamp & 0x00000000ffffffffUL;
 	ptp_timestamp_l   = ptp_timestamp_l32;
 
 	if (priv->pre_ptp_timestamp_l32 > ptp_timestamp_l)
@@ -504,7 +502,6 @@ EXPORT_SYMBOL(mch_ptp_open);
 int mch_ptp_close(void *ptp_handle)
 {
 	struct mch_private *priv;
-	struct net_device *ndev;
 	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
 	unsigned long flags;
 
@@ -514,8 +511,6 @@ int mch_ptp_close(void *ptp_handle)
 	priv = p_dev->priv;
 	if (!priv)
 		return -ENODEV;
-
-	ndev = priv->ndev;
 
 	/* move from active or inactive list */
 	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
@@ -543,7 +538,6 @@ int mch_ptp_capture_start(void *ptp_handle,
 {
 	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
 	struct mch_private *priv;
-	struct net_device *ndev;
 	struct ptp_capture_device *cap;
 	unsigned long flags;
 	int real_ch;
@@ -555,8 +549,6 @@ int mch_ptp_capture_start(void *ptp_handle,
 	priv = p_dev->priv;
 	if (!priv)
 		return -ENODEV;
-
-	ndev = priv->ndev;
 
 	if ((ch < AVTP_CAP_CH_MIN) || (ch > AVTP_CAP_CH_MAX))
 		return -EINVAL;
