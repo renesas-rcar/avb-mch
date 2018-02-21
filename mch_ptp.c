@@ -1,7 +1,7 @@
 /*************************************************************************/ /*
  avb-mch
 
- Copyright (C) 2016-2017 Renesas Electronics Corporation
+ Copyright (C) 2016-2018 Renesas Electronics Corporation
 
  License        Dual MIT/GPLv2
 
@@ -275,8 +275,10 @@ static void mch_ptp_capture_attach(struct mch_private *priv, int ch)
 
 		mch_set_adg_avb_sync_sel(priv, ch, priv->param.avtp_clk_name);
 
-		mch_regist_ravb(priv, priv->param.frq,
-				priv->param.avtp_cap_cycle, ch);
+		mch_regist_ravb(priv,
+				priv->param.avtp_clk_frq_actual,
+				priv->param.avtp_cap_cycle,
+				ch);
 
 		ravb_write(ndev, BIT(17 + ch), GIE);
 	}

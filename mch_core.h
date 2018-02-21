@@ -1,7 +1,7 @@
 /*************************************************************************/ /*
  avb-mch
 
- Copyright (C) 2017 Renesas Electronics Corporation
+ Copyright (C) 2017-2018 Renesas Electronics Corporation
 
  License        Dual MIT/GPLv2
 
@@ -111,8 +111,10 @@ struct mch_param {
 	int avtp_cap_ch;
 	int avtp_cap_cycle;
 	char avtp_clk_name[32];
-	int avtp_clk_frq;
-	u32 frq;
+	u32 avtp_clk_frq_ideal;
+	u32 avtp_clk_frq_actual;
+	u32 avb_clk_div;
+	u32 adg_clk;
 	int sample_rate;
 };
 

@@ -1,7 +1,7 @@
 /*************************************************************************/ /*
  avb-mch
 
- Copyright (C) 2016-2017 Renesas Electronics Corporation
+ Copyright (C) 2016-2018 Renesas Electronics Corporation
 
  License        Dual MIT/GPLv2
 
@@ -75,12 +75,15 @@
 
 struct mch_private *mch_priv_ptr;
 
-#define PPB_SCALE           (1000000000ULL)
-#define S0D1                (800 * 1000000)
-#define AVB_COUNTER_FRQ     (796800) /* 796812.7 / (16 * 166) = 300.0048Hz */
-#define AVB_COUNTER_FRQ_MIN (S0D1 / (0x3FFC0 / 32))
-#define AVB_COUNTER_FRQ_MAX 25000000
-#define CS2000_ID           0x06
+#define MCH_PPB_SCALE              1000000000ULL
+#define MCH_PPM_SCALE              1000000ULL
+
+#define ADG_AVB_CLK_DIV_MAX        0x3ffc0
+#define AVB_COUNTER_FRQ_MAX        25000000
+#define AVB_COUNTER_FRQ_ADJUST_MIN 100
+#define AVB_COUNTER_FRQ_ADJUST_MAX 120
+
+#define CS2000_ID              0x06
 
 #define MCH_CORRECT_CYCLE      (5 * 1000000) /* 5msec */
 #define MCH_TIME_TOLERANCE     (2 * 1000000) /* 2msec */
@@ -157,12 +160,12 @@ static char *interface = "eth0";
 module_param(interface, charp, 0440);
 
 static int avtp_cap_cycle = 300;
-module_param(avtp_cap_cycle, int, 0660);
+module_param(avtp_cap_cycle, int, 0440);
 
 static char *avtp_clk_name = "avb_counter0";
 module_param(avtp_clk_name, charp, 0440);
 
-static int avtp_clk_frq = AVB_COUNTER_FRQ;
+static int avtp_clk_frq;
 module_param(avtp_clk_frq, int, 0440);
 
 static int sample_rate = 48000;
@@ -174,7 +177,6 @@ static u8 cs2000_data[CS2000_REG_END];
 static DEFINE_SPINLOCK(mch_lock);
 
 static u32 get_avtp_cap_sync_sel_by_name(const char *name);
-static u32 calc_avb_counter(u32 frq);
 
 static int mch_clk_correct(struct mch_device *m_dev, s64 diff)
 {
@@ -209,13 +211,15 @@ static int mch_clk_correct(struct mch_device *m_dev, s64 diff)
 	}
 
 	if (m_dev->correct != correct) {
-		val = calc_avb_counter(priv->param.avtp_clk_frq);
-		val += correct;
-
-		pr_debug("clk correct %d to %d MCH freq (%u)  avb_counter (%08x)\n",
-			 m_dev->correct, correct,
-			 (u32)((32 * (u64)S0D1) / val), val);
+		val = priv->param.avb_clk_div + correct;
 		mch_adg_avb_write(priv, AVB_CLK_DIV0 + (reg * 4), val);
+
+		pr_debug("clk correct %d to %d MCH freq (%u) avb_counter (%08x)\n",
+			 m_dev->correct,
+			 correct,
+			 (u32)((32 * (u64)priv->param.adg_clk) / val),
+			 val);
+
 		m_dev->correct = correct;
 	}
 
@@ -538,7 +542,7 @@ int mch_get_recovery_value(void *mch, int *value)
 	if (!value)
 		return -EINVAL;
 
-	*value = PPB_SCALE;
+	*value = MCH_PPB_SCALE;
 
 	return 0;
 }
@@ -560,12 +564,6 @@ static int mch_check_params(struct mch_param *param)
 {
 	u32 reg;
 
-	if ((param->avtp_clk_frq < AVB_COUNTER_FRQ_MIN) ||
-	    (param->avtp_clk_frq > AVB_COUNTER_FRQ_MAX)) {
-		pr_err("invalid param.\n");
-		return -EINVAL;
-	}
-
 	reg = get_avtp_cap_sync_sel_by_name(param->avtp_clk_name);
 	if (reg != ADG_SYNC_SEL_AVB_COUNTER0) {
 		pr_err("invalid param.\n");
@@ -578,17 +576,6 @@ static int mch_check_params(struct mch_param *param)
 	}
 
 	return 0;
-}
-
-static u32 calc_avb_counter(u32 frq)
-{
-	if (!frq)
-		return 0;
-
-	if ((frq < AVB_COUNTER_FRQ_MIN) || (frq > AVB_COUNTER_FRQ_MAX))
-		return 0;
-
-	return  (u32)((32 * (u64)S0D1) / frq);
 }
 
 static int mch_regist_adg(struct mch_private *priv)
@@ -684,10 +671,9 @@ static int mch_set_adg_avbckr(struct mch_private *priv, char *clk_name)
 	return 0;
 }
 
-static int mch_set_adg_avb_clk_div(struct mch_private *priv, int freq,
-				   char *clk_name)
+static int mch_set_adg_avb_clk_div(struct mch_private *priv, char *clk_name)
 {
-	u32 sync_sel, clk_no, val, reg, calc_frq;
+	u32 sync_sel, clk_no, val, reg;
 
 	sync_sel = get_avtp_cap_sync_sel_by_name(clk_name);
 	if ((sync_sel >= ADG_SYNC_SEL_AVB_COUNTER0) &&
@@ -696,22 +682,19 @@ static int mch_set_adg_avb_clk_div(struct mch_private *priv, int freq,
 	else
 		return -1;
 
-	val = calc_avb_counter(freq);
+	val = priv->param.avb_clk_div;
 	if (!val)
 		return -1;
 
 	reg = AVB_CLK_DIV0 + (clk_no * 4);
 	mch_adg_avb_write(priv, reg, val);
-	calc_frq = (int)((32 * (u64)S0D1) / val);
 
 	/* avb_count8[clk_no] enable */
 	val = (1 << clk_no);
 	val |= mch_adg_avb_read(priv, AVB_CLK_CONFIG);
 	mch_adg_avb_write(priv, AVB_CLK_CONFIG, val);
 
-	pr_debug("freq (%d),  calc freq (%d)\n", freq, val);
-
-	return (int)calc_frq;
+	return 0;
 }
 
 static int mch_unregist_adg(struct mch_private *priv)
@@ -883,7 +866,7 @@ static int mch_set_cs2000(struct mch_private *priv, u32 out_frq, u32 in_frq)
 	/*                          ; Hybrid PLL Mode */
 	mch_cs2000_write_byte(client, CS2000_DEVICE_CFG2, 0x03);
 
-	/* 31:0 32-Bit Ratio  = (outpit-clock / input-clock ) * 2^20 */
+	/* 31:0 32-Bit Ratio  = (output-clock / input-clock ) * 2^20 */
 	ratio = (u64)out_frq << 20;
 	do_div(ratio, in_frq);
 
@@ -1035,6 +1018,73 @@ int mch_regist_interrupt(struct mch_private *priv,
 	return 0;
 }
 
+static u32 mch_calc_avtp_clk_frq(struct mch_param *param)
+{
+	int sync_div, gacp;
+	u32 avb_counter_frq_min;
+	u32 avb_clk_div;
+	u64 adg_clk;
+	u64 frq_actual;
+	u64 frq_ideal;
+	u64 frq_best;
+	u64 frq_diff;
+	u64 frq_diff_min;
+	u64 frq_adjust_ppm;
+
+	frq_best = 0;
+	frq_diff_min = U64_MAX;
+	adg_clk = param->adg_clk;
+	avb_counter_frq_min = (u32)(32 * adg_clk / ADG_AVB_CLK_DIV_MAX);
+
+	for (sync_div = 0; sync_div < 16; sync_div++) {
+		for (gacp = 0; gacp < 256; gacp++) {
+			frq_ideal = ((u64)avtp_cap_cycle * (gacp + 1)) << sync_div;
+
+			/* check ideal freq include in valid value range */
+			if (frq_ideal < avb_counter_frq_min ||
+			    frq_ideal > AVB_COUNTER_FRQ_MAX)
+				continue;
+
+			avb_clk_div = (u32)((32 * adg_clk) / frq_ideal);
+			if (!avb_clk_div)
+				continue;
+
+			frq_actual = (MCH_PPM_SCALE * 32 * adg_clk) / avb_clk_div;
+			frq_adjust_ppm = ((MCH_PPM_SCALE * (avb_clk_div + 1)) / avb_clk_div) - MCH_PPM_SCALE;
+
+			/* check the amount of clock frequency adjustment */
+			if (frq_adjust_ppm <= AVB_COUNTER_FRQ_ADJUST_MIN ||
+			    frq_adjust_ppm > AVB_COUNTER_FRQ_ADJUST_MAX)
+				continue;
+
+			/* choice the actual freq by diff minimum */
+			frq_diff = frq_actual - frq_ideal * MCH_PPM_SCALE;
+			if (frq_diff_min > frq_diff) {
+				frq_diff_min = frq_diff;
+				frq_best = frq_ideal;
+			}
+		}
+	}
+
+	if (!frq_best)
+		return 0;
+
+	avb_clk_div = (u32)((32 * adg_clk) / frq_best);
+
+	param->avb_clk_div = avb_clk_div;
+	param->avtp_clk_frq_ideal = frq_best;
+	param->avtp_clk_frq_actual = (32 * adg_clk) / avb_clk_div;
+
+	pr_debug("%s adg_clk %u avb_clk_div 0x%08x avtp_clk_frq ideal %u actual %u\n",
+		 param->avtp_clk_name,
+		 param->adg_clk,
+		 param->avb_clk_div,
+		 param->avtp_clk_frq_ideal,
+		 param->avtp_clk_frq_actual);
+
+	return param->avtp_clk_frq_actual;
+}
+
 static void mch_release(struct device *dev)
 {
 	/* reserved */
@@ -1050,6 +1100,7 @@ static int mch_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct clk *clk;
 	struct mch_param *param;
+	unsigned long adg_clk;
 	int i;
 
 	dev_info(&pdev->dev, "probe: start\n");
@@ -1067,22 +1118,10 @@ static int mch_probe(struct platform_device *pdev)
 
 	mch_priv_ptr = priv;
 
-	param = &priv->param;
-	param->avtp_cap_cycle = avtp_cap_cycle;
-	param->avtp_clk_frq = avtp_clk_frq;
-	strncpy(param->avtp_clk_name, avtp_clk_name,
-		sizeof(param->avtp_clk_name));
-	param->sample_rate = sample_rate;
-
-	err = mch_check_params(param);
-	if (err < 0)
-		goto out_release;
-
 	priv->pdev = pdev;
 	priv->dev = &pdev->dev;
 	priv->dev->release = mch_release;
 	dev_set_drvdata(&pdev->dev, priv);
-	priv->timestamp_diff_init = NSEC / param->avtp_cap_cycle;
 
 	err = mch_get_net_device_handle(priv);
 	if (err < 0)
@@ -1119,8 +1158,33 @@ static int mch_probe(struct platform_device *pdev)
 	if (err < 0)
 		goto out_release;
 
-	priv->clk = clk;
+	adg_clk = clk_get_rate(clk);
+	if (!adg_clk)
+		goto out_release;
 
+	param = &priv->param;
+	param->adg_clk = adg_clk;
+	param->avtp_cap_cycle = avtp_cap_cycle;
+	strncpy(param->avtp_clk_name, avtp_clk_name,
+		sizeof(param->avtp_clk_name));
+	param->sample_rate = sample_rate;
+
+	err = mch_check_params(param);
+	if (err < 0)
+		goto out_release;
+
+	/* calculate avtp_clk_frq */
+	avtp_clk_frq = mch_calc_avtp_clk_frq(param);
+	if (!avtp_clk_frq) {
+		pr_err("avtp_clk_frq could not be calculated");
+		err = -EINVAL;
+		goto out_release;
+	}
+
+	priv->clk = clk;
+	priv->timestamp_diff_init = NSEC / param->avtp_cap_cycle;
+
+	/* CS2000 */
 	err = mch_get_i2c_client(priv);
 	if (err < 0)
 		goto out_release;
@@ -1138,20 +1202,17 @@ static int mch_probe(struct platform_device *pdev)
 	/* register initialize for ADG */
 	mch_regist_adg(priv);
 
-	param->frq = mch_set_adg_avb_clk_div(priv,
-					     param->avtp_clk_frq,
-					     param->avtp_clk_name);
-	pr_debug("%s Frequency %u\n", param->avtp_clk_name, param->frq);
+	mch_set_adg_avb_clk_div(priv, param->avtp_clk_name);
 
 	mch_set_adg_avb_sync_div(priv,
-				 param->frq,
+				 param->avtp_clk_frq_actual,
 				 param->avtp_cap_cycle,
 				 param->avtp_clk_name);
 
 	mch_set_adg_avbckr(priv, param->avtp_clk_name);
 
 	/* CS2000-cp initialize */
-	mch_set_cs2000(priv, 24576000, param->frq);
+	mch_set_cs2000(priv, 24576000, param->avtp_clk_frq_ideal);
 
 	dev_info(&pdev->dev, "probe: success\n");
 
