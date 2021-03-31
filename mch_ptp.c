@@ -1,7 +1,7 @@
 /*************************************************************************/ /*
  avb-mch
 
- Copyright (C) 2016-2018 Renesas Electronics Corporation
+ Copyright (C) 2016-2018,2021 Renesas Electronics Corporation
 
  License        Dual MIT/GPLv2
 
@@ -817,7 +817,6 @@ int mch_ptp_timer_start(void *timer_handler, u32 start)
 		ravb_write(ndev, BIT(3 + pt_dev->ch), GIE);
 	}
 
-	mmiowb();
 	spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
 
 	return error;
@@ -847,7 +846,6 @@ int mch_ptp_timer_cancel(void *timer_handler)
 	/* Mask interrupt */
 	ravb_write(ndev, BIT(3 + pt_dev->ch), GID);
 
-	mmiowb();
 	spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
 
 	return error;
