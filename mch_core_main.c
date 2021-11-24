@@ -1,7 +1,7 @@
 /*************************************************************************/ /*
  avb-mch
 
- Copyright (C) 2016-2018 Renesas Electronics Corporation
+ Copyright (C) 2016-2018,2021 Renesas Electronics Corporation
 
  License        Dual MIT/GPLv2
 
@@ -134,6 +134,13 @@ static struct reg_val_table avtp_cap_sync_sel_tbl[] = {
 	{ },
 };
 
+static u32 avbckr_audio_clkout[4] = {
+	0x00000008,		/* AVBCKR AUDIO_CLK select avb_counter8[0] */
+	0x00000800,		/* AVBCKR AUDIO_CLK1 select avb_counter8[0] */
+	0x00080000,		/* AVBCKR AUDIO_CLK2 select avb_counter8[0] */
+	0x08000000,		/* AVBCKR AUDIO_CLK3 select avb_counter8[0] */
+};
+
 enum CS2000 {
 	CS2000_DEVICE_ID        = 0x01,
 	CS2000_DEVICE_CTRL      = 0x02,
@@ -170,6 +177,10 @@ module_param(avtp_clk_frq, int, 0440);
 
 static int sample_rate = 48000;
 module_param(sample_rate, int, 0440);
+
+/* Select AVB Clock */
+static int avb_clk;
+module_param(avb_clk, int, 0440);
 
 static u8 cs2000_data_bk[CS2000_REG_END];
 static u8 cs2000_data[CS2000_REG_END];
@@ -665,7 +676,12 @@ static int mch_set_adg_avbckr(struct mch_private *priv, char *clk_name)
 	else
 		return -1;
 
-	val = 0x00000008 | clk_no;
+	if (avb_clk < 0)
+		avb_clk = 0;
+	if (avb_clk > 3)
+		avb_clk = 3;
+
+	val = avbckr_audio_clkout[avb_clk] | clk_no;
 	mch_adg_avb_write(priv, AVBCKR, val);
 
 	return 0;
