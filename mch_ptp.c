@@ -476,8 +476,10 @@ void *mch_ptp_open(void)
 	struct ptp_device *p_dev = NULL;
 	unsigned long flags;
 
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return NULL;
+	}
 
 	p_dev = kzalloc(sizeof(*p_dev), GFP_KERNEL);
 	if (!p_dev)
@@ -507,12 +509,16 @@ int mch_ptp_close(void *ptp_handle)
 	struct ptp_device *p_dev = (struct ptp_device *)ptp_handle;
 	unsigned long flags;
 
-	if (!ptp_handle)
+	if (!ptp_handle) {
+		pr_err("%s failure: ptp_handle is null\n", __func__);
 		return -EINVAL;
+	}
 
 	priv = p_dev->priv;
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
 	/* move from active or inactive list */
 	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
@@ -545,21 +551,31 @@ int mch_ptp_capture_start(void *ptp_handle,
 	int real_ch;
 	void *timestamps;
 
-	if (!ptp_handle)
+	if (!ptp_handle) {
+		pr_err("%s failure: ptp_handle is null\n", __func__);
 		return -EINVAL;
+	}
 
 	priv = p_dev->priv;
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
-	if ((ch < AVTP_CAP_CH_MIN) || (ch > AVTP_CAP_CH_MAX))
+	if ((ch < AVTP_CAP_CH_MIN) || (ch > AVTP_CAP_CH_MAX)) {
+		pr_err("%s failure: wrong channel, ch=%d\n", __func__, ch);
 		return -EINVAL;
+	}
 
-	if (p_dev->que.timestamps)
+	if (p_dev->que.timestamps) {
+		pr_err("%s failure: no timestamps\n", __func__);
 		return -EBUSY;
+	}
 
-	if (max_count < 1)
+	if (max_count < 1) {
+		pr_err("%s failure: invalid max_count: %d\n", __func__, max_count);
 		return -EINVAL;
+	}
 
 	timestamps = kcalloc(max_count + 1, sizeof(u64), GFP_KERNEL);
 	if (!timestamps)
@@ -597,15 +613,21 @@ int mch_ptp_capture_stop(void *ptp_handle)
 	unsigned long flags;
 	void *timestamps;
 
-	if (!ptp_handle)
+	if (!ptp_handle) {
+		pr_err("%s failure: ptp_handle is null\n", __func__);
 		return -EINVAL;
+	}
 
 	priv = p_dev->priv;
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
-	if (!p_dev->que.timestamps)
+	if (!p_dev->que.timestamps) {
+		pr_err("%s failure: no timestamps\n", __func__);
 		return -EPERM;
+	}
 
 	/* move from active list to inactive list */
 	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
@@ -643,17 +665,25 @@ int mch_ptp_get_timestamps(void *ptp_handle,
 
 	pr_debug("[%s] START\n", __func__);
 
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
-	if (!p_dev)
+	if (!p_dev) {
+		pr_err("%s failure: no p_dev\n", __func__);
 		return -EINVAL;
+	}
 
-	if (!timestamps)
+	if (!timestamps) {
+		pr_err("%s failure: no timestamps\n", __func__);
 		return -EINVAL;
+	}
 
-	if (p_dev->capture_ch == AVTP_CAP_CH_INVALID)
+	if (p_dev->capture_ch == AVTP_CAP_CH_INVALID) {
+		pr_err("%s failure: invalid capture_ch: %d\n", __func__, p_dev->capture_ch);
 		return -EPERM;
+	}
 
 	spin_lock_irqsave(&p_dev->qlock, flags);
 
@@ -721,8 +751,10 @@ void *mch_ptp_timer_open(u32 (*handler)(void *), void *arg)
 	unsigned long flags;
 	int ch;
 
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return NULL;
+	}
 
 	pt_dev = kzalloc(sizeof(*pt_dev), GFP_KERNEL);
 	if (!pt_dev)
@@ -765,12 +797,16 @@ int mch_ptp_timer_close(void *timer_handler)
 	unsigned long flags;
 	int ch;
 
-	if (!pt_dev)
+	if (!pt_dev) {
+		pr_err("%s failure: pt_dev is null\n", __func__);
 		return -EINVAL;
+	}
 
 	priv = pt_dev->priv;
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
 	ndev = priv->ndev;
 
@@ -798,17 +834,23 @@ int mch_ptp_timer_start(void *timer_handler, u32 start)
 	unsigned long flags;
 	int error = 0;
 
-	if (!pt_dev)
+	if (!pt_dev) {
+		pr_err("%s failure: pt_dev is null\n", __func__);
 		return -EINVAL;
+	}
 
 	priv = pt_dev->priv;
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
 	ndev = priv->ndev;
 
-	if (pt_dev->status)
+	if (pt_dev->status) {
+		pr_err("%s failure: device is busy: %d\n", __func__, pt_dev->status);
 		return -EBUSY;
+	}
 
 	spin_lock_irqsave(&mch_ptp_timer_lock, flags);
 
@@ -837,12 +879,16 @@ int mch_ptp_timer_cancel(void *timer_handler)
 	unsigned long flags;
 	struct net_device *ndev;
 
-	if (!pt_dev)
+	if (!pt_dev) {
+		pr_err("%s failure: pt_dev is null\n", __func__);
 		return -EINVAL;
+	}
 
 	priv = pt_dev->priv;
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
 	ndev = priv->ndev;
 
