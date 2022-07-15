@@ -273,7 +273,11 @@ static int mch_task(void *param)
 			pr_debug("mch task terminate\n");
 			/* restore clock correction */
 			diff_ave = 0;
-			mch_clk_correct(m_dev, diff_ave);
+
+			ret = mch_clk_correct(m_dev, diff_ave);
+			if (ret < 0)
+				pr_err("failed to restore clock correction, err=%d\n", ret);
+
 			break;
 		}
 
@@ -368,7 +372,9 @@ static int mch_task(void *param)
 		if (diff_cnt)
 			diff_ave /= diff_cnt;
 
-		mch_clk_correct(m_dev, diff_ave);
+		ret = mch_clk_correct(m_dev, diff_ave);
+		if (ret < 0)
+			pr_err("failed to set clock correction, err=%d\n", ret);
 
 		kfree(ts->ts);
 		kfree(ts);
