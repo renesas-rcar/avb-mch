@@ -416,18 +416,18 @@ void *mch_open(void)
 	unsigned long flags;
 
 	if (!priv)
-		return NULL;
+		goto error;
 
 	if (priv->m_dev[0])
-		return NULL;
+		goto error;
 
 	m_dev = kzalloc(sizeof(*m_dev), GFP_KERNEL);
 	if (!m_dev)
-		return NULL;
+		goto error;
 
 	if (init_mch_device(m_dev)) {
 		kfree(m_dev);
-		return NULL;
+		goto error;
 	}
 
 	spin_lock_irqsave(&mch_lock, flags);
@@ -440,6 +440,11 @@ void *mch_open(void)
 	pr_info("registered mch device %p\n", m_dev);
 
 	return (void *)m_dev;
+
+error:
+	pr_err("failed to open media clock handler\n");
+
+	return NULL;
 }
 EXPORT_SYMBOL(mch_open);
 
