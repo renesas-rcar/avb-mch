@@ -1276,7 +1276,7 @@ out_release:
 no_memory:
 	mch_priv_ptr = NULL;
 
-	dev_info(&pdev->dev, "probe: failed\n");
+	dev_err(&pdev->dev, "probe: failed, err=%d\n", err);
 
 	return err;
 }
