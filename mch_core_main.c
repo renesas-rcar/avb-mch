@@ -415,11 +415,15 @@ void *mch_open(void)
 	struct mch_device *m_dev = NULL;
 	unsigned long flags;
 
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		goto error;
+	}
 
-	if (priv->m_dev[0])
+	if (priv->m_dev[0]) {
+		pr_err("%s failure: no m_dev[0]\n", __func__);
 		goto error;
+	}
 
 	m_dev = kzalloc(sizeof(*m_dev), GFP_KERNEL);
 	if (!m_dev)
@@ -455,12 +459,16 @@ int mch_close(void *mch)
 	unsigned long flags;
 	struct mch_timestamps *ts, *tmp;
 
-	if (!m_dev)
+	if (!m_dev) {
+		pr_err("%s failure: m_dev is null\n", __func__);
 		return -EINVAL;
+	}
 
 	priv = m_dev->priv;
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
 	m_dev->pending_events = TASK_EVENT_TERM;
 	wake_up_interruptible(&m_dev->wait_event);
@@ -490,8 +498,10 @@ int mch_set_interval(void *mch, u32 ns)
 {
 	struct mch_device *m_dev = (struct mch_device *)mch;
 
-	if (!m_dev)
+	if (!m_dev) {
+		pr_err("%s failure: m_dev is null\n", __func__);
 		return -EINVAL;
+	}
 
 	m_dev->interval = ns;
 
@@ -509,22 +519,32 @@ int mch_send_timestamps(void *mch,
 	int i;
 	unsigned long flags;
 
-	if (!m_dev)
+	if (!m_dev) {
+		pr_err("%s failure: m_dev is null\n", __func__);
 		return -EINVAL;
+	}
 
 	priv = m_dev->priv;
 
-	if (!priv)
+	if (!priv) {
+		pr_err("%s failure: priv is null\n", __func__);
 		return -ENODEV;
+	}
 
-	if (!m_dev->interval)
+	if (!m_dev->interval) {
+		pr_err("%s failure: no interval\n", __func__);
 		return -EPERM;
+	}
 
-	if (count < 1)
+	if (count < 1) {
+		pr_err("%s failure: invalid count: %d\n", __func__, count);
 		return -EINVAL;
+	}
 
-	if (!ts)
+	if (!ts) {
+		pr_err("%s failure: ts is null\n", __func__);
 		return -EINVAL;
+	}
 
 	timestamps = kzalloc(sizeof(*timestamps), GFP_KERNEL);
 	if (!timestamps)
@@ -560,11 +580,15 @@ EXPORT_SYMBOL(mch_send_timestamps);
 
 int mch_get_recovery_value(void *mch, int *value)
 {
-	if (!mch)
+	if (!mch) {
+		pr_err("%s failure: mch is null\n", __func__);
 		return -EINVAL;
+	}
 
-	if (!value)
+	if (!value) {
+		pr_err("%s failure: value is null\n", __func__);
 		return -EINVAL;
+	}
 
 	*value = MCH_PPB_SCALE;
 
@@ -762,8 +786,10 @@ static int mch_get_i2c_client(struct mch_private *priv)
 	np = of_find_compatible_node(NULL, NULL, "cirrus,cs2000-cp");
 	/* must call put_device() when done with returned i2c_client device */
 	client = of_find_i2c_device_by_node(np);
-	if (!client)
+	if (!client) {
+		pr_err("%s failure: cant find i2c client\n", __func__);
 		return -ENODEV;
+	}
 
 	priv->client = client;
 
@@ -777,8 +803,10 @@ static int mch_check_cs2000_id(struct mch_private *priv)
 
 	val = i2c_smbus_read_byte_data(client, 0x01);
 
-	if (val != CS2000_ID)
+	if (val != CS2000_ID) {
+		pr_err("wrong ID, val=0x%x\n", val);
 		return -ENODEV;
+	}
 
 	return 0;
 }
