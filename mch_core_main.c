@@ -392,8 +392,10 @@ static int init_mch_device(struct mch_device *m_dev)
 
 	sprintf(taskname, "mch_task");
 	m_dev->task = kthread_run(mch_task, m_dev, taskname);
-	if (IS_ERR(m_dev->task))
+	if (IS_ERR(m_dev->task)) {
+		pr_err("failed to start mch_task, err=%ld\n", PTR_ERR(m_dev->task));
 		return -1;
+	}
 
 	return 0;
 }
@@ -618,6 +620,7 @@ int mch_set_adg_avb_sync_sel(struct mch_private *priv, int ch,
 		reg = AVB_SYNC_SEL0;
 		break;
 	default:
+		pr_err("failed to set sync_sel for %s clock\n", clk_name);
 		return -1;
 	}
 	val = mch_adg_avb_read(priv, reg);
@@ -646,6 +649,7 @@ static int mch_set_adg_avb_sync_div(struct mch_private *priv, int freq,
 		reg = AVB_SYNC_DIV1;
 		clk_no = sync_sel - ADG_SYNC_SEL_AVB_COUNTER0;
 	} else {
+		pr_err("failed to set sync_div for %s clock\n", clk_name);
 		return -1;
 	}
 
@@ -655,8 +659,10 @@ static int mch_set_adg_avb_sync_div(struct mch_private *priv, int freq,
 		if ((tmp / 256) < cap_cycle)
 			break;
 	}
-	if (i == 16)
+	if (i == 16) {
+		pr_err("wrong divider obtained, i=%d\n", i);
 		return -1;
+	}
 
 	val = mch_adg_avb_read(priv, reg);
 	val |= (i << (clk_no * 4));
@@ -671,10 +677,12 @@ static int mch_set_adg_avbckr(struct mch_private *priv, char *clk_name)
 
 	sync_sel = get_avtp_cap_sync_sel_by_name(clk_name);
 	if ((sync_sel >= ADG_SYNC_SEL_AVB_COUNTER0) &&
-	    (sync_sel <= ADG_SYNC_SEL_AVB_COUNTER7))
+	    (sync_sel <= ADG_SYNC_SEL_AVB_COUNTER7)) {
 		clk_no = sync_sel - ADG_SYNC_SEL_AVB_COUNTER0;
-	else
+	} else {
+		pr_err("failed to set clk rate for %s clock\n", clk_name);
 		return -1;
+	}
 
 	if (avb_clk < 0)
 		avb_clk = 0;
@@ -916,8 +924,10 @@ static int mch_get_net_device_handle(struct mch_private *priv)
 	struct device *pdev_dev;
 	const struct of_device_id *match;
 
-	if (!ndev)
+	if (!ndev) {
+		pr_err("failed to get network device\n");
 		return -ENODEV;
+	}
 
 	pdev_dev = ndev->dev.parent;
 
@@ -1148,13 +1158,17 @@ static int mch_probe(struct platform_device *pdev)
 
 	/* MCH PTP Capture device initialize */
 	err = mch_ptp_capture_init(priv);
-	if (err < 0)
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to init ptp capture, err=%d\n", err);
 		goto out_release;
+	}
 
 	/* MCH PTP Timer device initialize */
 	err = mch_ptp_timer_init(priv);
-	if (err < 0)
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to init ptp timer, err=%d\n", err);
 		goto out_release;
+	}
 
 	priv->adg_avb_addr = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(priv->adg_avb_addr)) {
@@ -1167,16 +1181,22 @@ static int mch_probe(struct platform_device *pdev)
 
 	err = -ENODEV;
 	clk = devm_clk_get(&pdev->dev, "adg");
-	if (IS_ERR(clk))
+	if (IS_ERR(clk)) {
+		dev_err(&pdev->dev, "failed to get adg clock, err=%ld\n", PTR_ERR(clk));
 		goto out_release;
+	}
 
 	err = clk_prepare_enable(clk);
-	if (err < 0)
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to enable adg clock, err=%d\n", err);
 		goto out_release;
+	}
 
 	adg_clk = clk_get_rate(clk);
-	if (!adg_clk)
+	if (!adg_clk) {
+		dev_err(&pdev->dev, "failed to get adg clock rate\n");
 		goto out_release;
+	}
 
 	param = &priv->param;
 	param->adg_clk = adg_clk;
@@ -1202,12 +1222,16 @@ static int mch_probe(struct platform_device *pdev)
 
 	/* CS2000 */
 	err = mch_get_i2c_client(priv);
-	if (err < 0)
+	if (err < 0) {
+		dev_err(&pdev->dev, "cs2000 device node not found\n");
 		goto out_release;
+	}
 
 	err = mch_check_cs2000_id(priv);
-	if (err < 0)
+	if (err < 0) {
+		dev_err(&pdev->dev, "incorrect cs2000 device id\n");
 		goto out_release;
+	}
 
 	err = mch_cs2000_read_all(priv, cs2000_data_bk);
 	if (err < 0)
