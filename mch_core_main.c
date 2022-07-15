@@ -595,7 +595,7 @@ static int mch_check_params(struct mch_param *param)
 	}
 
 	if (param->sample_rate % 48000) {
-		pr_err("invalid param.\n");
+		pr_err("invalid sample_rate: %d\n", param->sample_rate);
 		return -EINVAL;
 	}
 
@@ -1021,7 +1021,7 @@ int mch_regist_interrupt(struct mch_private *priv,
 	/* regist interrupt of avtp capture */
 	irq = platform_get_irq_byname(net_priv->pdev, ch);
 	if (irq < 0) {
-		pr_err("init: unsupport irq name (%s)\n", ch);
+		pr_err("init: unsupported irq name, ch=%s, err=%d\n", ch, irq);
 		return irq;
 	}
 
