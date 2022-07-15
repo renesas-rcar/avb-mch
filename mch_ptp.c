@@ -679,8 +679,10 @@ int mch_ptp_capture_init(struct mch_private *priv)
 				   "multi_A",
 				   mch_ptp_timestamp_interrupt,
 				   mch_ptp_timestamp_interrupt_th);
-	if (err < 0)
+	if (err < 0) {
+		pr_err("failed to init ptp capture, err=%d\n", err);
 		return err;
+	}
 
 	for (i = 0; i < AVTP_CAP_DEVICES; i++) {
 		cap = &priv->cap_dev[i];
@@ -738,6 +740,7 @@ void *mch_ptp_timer_open(u32 (*handler)(void *), void *arg)
 	if (!(ch < MCH_PTP_TIMER_MAX)) {
 		spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
 		kfree(pt_dev);
+		pr_err("failed to open mch ptp timer, ch=%d\n", ch);
 		return NULL;
 	}
 
@@ -818,6 +821,9 @@ int mch_ptp_timer_start(void *timer_handler, u32 start)
 	}
 
 	spin_unlock_irqrestore(&mch_ptp_timer_lock, flags);
+
+	if (error)
+		pr_err("failed to start mch ptp timer, err=%d\n", error);
 
 	return error;
 }
