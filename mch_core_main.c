@@ -1223,7 +1223,7 @@ static int mch_probe(struct platform_device *pdev)
 	/* calculate avtp_clk_frq */
 	avtp_clk_frq = mch_calc_avtp_clk_frq(param);
 	if (!avtp_clk_frq) {
-		pr_err("avtp_clk_frq could not be calculated");
+		dev_err(&pdev->dev, "avtp_clk_frq could not be calculated\n");
 		err = -EINVAL;
 		goto out_release;
 	}
