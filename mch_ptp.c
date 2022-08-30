@@ -562,7 +562,7 @@ int mch_ptp_capture_start(void *ptp_handle,
 		return -ENODEV;
 	}
 
-	if ((ch < AVTP_CAP_CH_MIN) || (ch > AVTP_CAP_CH_MAX)) {
+	if (ch < AVTP_CAP_CH_MIN || ch > AVTP_CAP_CH_MAX) {
 		pr_err("%s failure: wrong channel, ch=%d\n", __func__, ch);
 		return -EINVAL;
 	}
