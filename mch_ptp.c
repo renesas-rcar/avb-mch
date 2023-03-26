@@ -1,7 +1,7 @@
 /*************************************************************************/ /*
  avb-mch
 
- Copyright (C) 2016-2018,2021 Renesas Electronics Corporation
+ Copyright (C) 2016-2018,2021,2023 Renesas Electronics Corporation
 
  License        Dual MIT/GPLv2
 
@@ -263,10 +263,12 @@ static void mch_ptp_correct_timestamp(struct mch_private *priv,
 static void mch_ptp_capture_attach(struct mch_private *priv, int ch)
 {
 	struct net_device *ndev = priv->ndev;
-	struct ptp_capture_device *cap = &priv->cap_dev[ch];
+	struct ptp_capture_device *cap;
 
 	if (ch < 0)
 		return;
+
+	cap = &priv->cap_dev[ch];
 
 	if (atomic_inc_return(&cap->attached) == 1) {
 		cap->status = AVTP_CAP_STATE_INIT;
@@ -287,10 +289,12 @@ static void mch_ptp_capture_attach(struct mch_private *priv, int ch)
 static void mch_ptp_capture_detach(struct mch_private *priv, int ch)
 {
 	struct net_device *ndev = priv->ndev;
-	struct ptp_capture_device *cap = &priv->cap_dev[ch];
+	struct ptp_capture_device *cap;
 
 	if (ch < 0)
 		return;
+
+	cap = &priv->cap_dev[ch];
 
 	if (!atomic_dec_if_positive(&cap->attached))
 		ravb_write(ndev, BIT(17 + ch), GID);
