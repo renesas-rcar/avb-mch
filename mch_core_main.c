@@ -92,8 +92,6 @@ struct mch_private *mch_priv_ptr;
 #define MCH_TIME_TOLERANCE     (2 * 1000000) /* 2msec */
 #define MCH_CORRECT_JUDGE_OVER (3 * 1000000) /* 3msec */
 #define MCH_CORRECT_JUDGE      (300)         /* 300nsec */
-#define MCH_KTHREAD_WAIT_MIN   (2000)        /* 2msec */
-#define MCH_KTHREAD_WAIT_MAX   (2010)        /* 2msec */
 
 struct reg_val_table {
 	const char *name;
@@ -282,9 +280,10 @@ static int mch_task(void *param)
 			ret = mch_clk_correct(m_dev, diff_ave);
 			if (ret < 0)
 				pr_err("failed to restore clock correction, err=%d\n", ret);
-			while (!kthread_should_stop())
-				usleep_range(MCH_KTHREAD_WAIT_MIN,
-					     MCH_KTHREAD_WAIT_MAX);
+			while (!kthread_should_stop()) {
+				set_current_state(TASK_INTERRUPTIBLE);
+				schedule();
+			}
 			break;
 		}
 
@@ -319,9 +318,10 @@ static int mch_task(void *param)
 			if (m_dev->pending_events & TASK_EVENT_TERM) {
 				pr_debug("mch task terminate req\n");
 				diff_ave = 0;   /* restore clock correction */
-				while (!kthread_should_stop())
-					usleep_range(MCH_KTHREAD_WAIT_MIN,
-						     MCH_KTHREAD_WAIT_MAX);
+				while (!kthread_should_stop()){
+					set_current_state(TASK_INTERRUPTIBLE);
+					schedule();
+				}
 				break;
 			}
 
