@@ -115,6 +115,11 @@ static int mch_ptp_timestamp_enqueue(struct mch_private *priv,
 	list_for_each_entry(p_dev, &cap->active, list) {
 		/* add to queue */
 		spin_lock_irqsave(&p_dev->qlock, flags);
+		if (p_dev->capture_ch == AVTP_CAP_CH_INVALID) {
+			spin_unlock_irqrestore(&p_dev->qlock, flags);
+			pr_err("%s failure: invalid capture_ch: %d\n", __func__, p_dev->capture_ch);
+			return -EPERM;
+		}
 		enqueue(&p_dev->que, timestamp);
 		spin_unlock_irqrestore(&p_dev->qlock, flags);
 	}
@@ -684,12 +689,13 @@ int mch_ptp_get_timestamps(void *ptp_handle,
 		return -EINVAL;
 	}
 
+	spin_lock_irqsave(&p_dev->qlock, flags);
+
 	if (p_dev->capture_ch == AVTP_CAP_CH_INVALID) {
+		spin_unlock_irqrestore(&p_dev->qlock, flags);
 		pr_err("%s failure: invalid capture_ch: %d\n", __func__, p_dev->capture_ch);
 		return -EPERM;
 	}
-
-	spin_lock_irqsave(&p_dev->qlock, flags);
 
 	for (i = 0; i < req_count; i++)
 		if (dequeue(&p_dev->que, &timestamps[i]) < 0)
