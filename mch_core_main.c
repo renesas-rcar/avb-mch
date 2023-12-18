@@ -439,17 +439,18 @@ void *mch_open(void)
 	if (!m_dev)
 		goto error;
 
+	spin_lock_irqsave(&mch_lock, flags);
+	m_dev->priv = priv;
+	priv->m_dev[0] = m_dev;
+	spin_unlock_irqrestore(&mch_lock, flags);
+
 	if (init_mch_device(m_dev)) {
+		spin_lock_irqsave(&mch_lock, flags);
+		priv->m_dev[0] = NULL;
+		spin_unlock_irqrestore(&mch_lock, flags);
 		kfree(m_dev);
 		goto error;
 	}
-
-	spin_lock_irqsave(&mch_lock, flags);
-
-	m_dev->priv = priv;
-	priv->m_dev[0] = m_dev;
-
-	spin_unlock_irqrestore(&mch_lock, flags);
 
 	pr_info("registered mch device %p\n", m_dev);
 
