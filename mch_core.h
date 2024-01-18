@@ -149,7 +149,6 @@ struct ptp_device {
 
 	int			capture_ch;
 	struct ptp_queue	que;
-	spinlock_t		qlock; /* for timestamp queue */
 	struct list_head	list;
 };
 

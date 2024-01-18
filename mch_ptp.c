@@ -112,18 +112,18 @@ static int mch_ptp_timestamp_enqueue(struct mch_private *priv,
 
 	cap = &priv->cap_dev[ch];
 
+	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
+
 	list_for_each_entry(p_dev, &cap->active, list) {
 		/* add to queue */
-		spin_lock_irqsave(&p_dev->qlock, flags);
 		if (p_dev->capture_ch == AVTP_CAP_CH_INVALID) {
-			spin_unlock_irqrestore(&p_dev->qlock, flags);
+			spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 			pr_err("%s failure: invalid capture_ch: %d\n", __func__, p_dev->capture_ch);
 			return -EPERM;
 		}
 		enqueue(&p_dev->que, timestamp);
-		spin_unlock_irqrestore(&p_dev->qlock, flags);
 	}
-
+	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 	return 0;
 }
 
@@ -500,7 +500,6 @@ void *mch_ptp_open(void)
 	p_dev->que.max_cnt = -1;
 	p_dev->que.timestamps = NULL;
 	p_dev->capture_ch = AVTP_CAP_CH_INVALID;
-	spin_lock_init(&p_dev->qlock);
 
 	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
 	list_add_tail(&p_dev->list, &priv->ptp_capture_inactive);
@@ -532,7 +531,6 @@ int mch_ptp_close(void *ptp_handle)
 	/* move from active or inactive list */
 	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
 	list_del(&p_dev->list);
-	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 
 	/* capture stop */
 	mch_ptp_capture_detach(priv, p_dev->capture_ch);
@@ -544,6 +542,8 @@ int mch_ptp_close(void *ptp_handle)
 	kfree(p_dev);
 
 	pr_debug("close mch_ptp device  index=0x%p\n", p_dev);
+
+	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 
 	return 0;
 }
@@ -592,15 +592,11 @@ int mch_ptp_capture_start(void *ptp_handle,
 
 	real_ch = ch - AVTP_CAP_CH_MIN;
 
-	spin_lock_irqsave(&p_dev->qlock, flags);
+	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
 
 	p_dev->que.timestamps = timestamps;
 	p_dev->que.max_cnt = max_count + 1;
 	p_dev->capture_ch = real_ch;
-
-	spin_unlock_irqrestore(&p_dev->qlock, flags);
-
-	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
 
 	/* move from inactive list to active list */
 	cap = &priv->cap_dev[real_ch];
@@ -641,20 +637,17 @@ int mch_ptp_capture_stop(void *ptp_handle)
 	/* move from active list to inactive list */
 	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
 	list_move_tail(&p_dev->list, &priv->ptp_capture_inactive);
-	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 
 	/* capture stop */
 	mch_ptp_capture_detach(priv, p_dev->capture_ch);
 
 	/* clear ptp device */
-	spin_lock_irqsave(&p_dev->qlock, flags);
-
 	timestamps = p_dev->que.timestamps;
 	p_dev->que.timestamps = NULL;
 	p_dev->que.max_cnt = -1;
 	p_dev->capture_ch = AVTP_CAP_CH_INVALID;
 
-	spin_unlock_irqrestore(&p_dev->qlock, flags);
+	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 
 	/* free timestamp buffer */
 	kfree(timestamps);
@@ -689,10 +682,10 @@ int mch_ptp_get_timestamps(void *ptp_handle,
 		return -EINVAL;
 	}
 
-	spin_lock_irqsave(&p_dev->qlock, flags);
+	spin_lock_irqsave(&mch_ptp_cap_lock, flags);
 
 	if (p_dev->capture_ch == AVTP_CAP_CH_INVALID) {
-		spin_unlock_irqrestore(&p_dev->qlock, flags);
+		spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 		pr_err("%s failure: invalid capture_ch: %d\n", __func__, p_dev->capture_ch);
 		return -EPERM;
 	}
@@ -701,7 +694,7 @@ int mch_ptp_get_timestamps(void *ptp_handle,
 		if (dequeue(&p_dev->que, &timestamps[i]) < 0)
 			break;
 
-	spin_unlock_irqrestore(&p_dev->qlock, flags);
+	spin_unlock_irqrestore(&mch_ptp_cap_lock, flags);
 
 	pr_debug("[%s] END\n", __func__);
 
