@@ -414,6 +414,8 @@ static irqreturn_t mch_ptp_compare_interrupt(int irq, void *dev_id)
 	u32 period;
 	irqreturn_t result = IRQ_NONE;
 	int ch;
+	u32 pre_time, gccr;
+	u32 check_point_time;
 
 	gis &= ravb_read(ndev, GIC);
 
@@ -426,7 +428,36 @@ static irqreturn_t mch_ptp_compare_interrupt(int irq, void *dev_id)
 				period = 0;
 
 			if (period) {
-				pt_dev->time += period;
+				pre_time = pt_dev->time;
+				gccr = ravb_read(ndev, GCCR);
+				gccr &= ~(3 << 8);
+				gccr &= ~(3);
+				gccr |= GCCR_TCSS_AVTP;
+				ravb_write(ndev, gccr | GCCR_TCR, GCCR);
+				if (ravb_wait_reg(ndev, GCCR, GCCR_TCR, 0))
+				{
+					pr_debug("timeout occurred at channel %d\n", ch);
+					continue;
+				}
+				check_point_time = ravb_read(ndev, GCT0);
+				gccr = ravb_read(ndev, GCCR);
+				gccr &= ~(3 << 8);
+				gccr &= ~(3);
+				gccr |= GCCR_TCSS_ADJGPTP;
+				ravb_write(ndev, gccr | GCCR_TCR, GCCR);
+				if (ravb_wait_reg(ndev, GCCR, GCCR_TCR, 0))
+				{
+					pr_debug("timeout occurred at channel %d\n", ch);
+					continue;
+				}
+				if ((pre_time < (pt_dev->time + period)) && ((pt_dev->time + period) <= check_point_time))
+				{
+					pt_dev->time = check_point_time + period;
+				}
+				else
+				{
+					pt_dev->time = pt_dev->time + period;
+				}
 				ravb_ptp_update_compare(priv,
 							ch,
 							pt_dev->time);
