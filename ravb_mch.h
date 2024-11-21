@@ -109,7 +109,7 @@ int mch_ptp_get_timestamps(void *ptp_handle,
 /*
  * In-Kernel PTP Timer API
  */
-void *mch_ptp_timer_open(u32 (*handler)(void *), void *priv);
+void *mch_ptp_timer_open(u32 (*handler)(void *, bool *), void *priv);
 
 int mch_ptp_timer_close(void *timer_handle);
 

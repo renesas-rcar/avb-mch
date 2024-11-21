@@ -159,7 +159,7 @@ struct ptp_timer_device {
 	int			ch;
 	u32			time;
 	void			*arg;
-	u32			(*func)(void *);
+	u32			(*func)(void *, bool *);
 };
 
 struct ptp_capture_device {
