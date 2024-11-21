@@ -414,8 +414,11 @@ static irqreturn_t mch_ptp_compare_interrupt(int irq, void *dev_id)
 	u32 period;
 	irqreturn_t result = IRQ_NONE;
 	int ch;
-	u32 pre_time, gccr;
-	u32 check_point_time;
+	static u32 pre_time = 0;
+	u32 gccr;
+	u64 check_point_time;
+	static bool check_period = true;
+	bool is_type_mpeg2ts;
 
 	gis &= ravb_read(ndev, GIC);
 
@@ -423,47 +426,83 @@ static irqreturn_t mch_ptp_compare_interrupt(int irq, void *dev_id)
 		pt_dev = priv->tim_dev[ch];
 		if (gis & BIT(3 + ch)) {
 			if (pt_dev->func)
-				period = pt_dev->func(pt_dev->arg);
+				period = pt_dev->func(pt_dev->arg, &is_type_mpeg2ts);
 			else
 				period = 0;
 
 			if (period) {
-				pre_time = pt_dev->time;
-				gccr = ravb_read(ndev, GCCR);
-				gccr &= ~(3 << 8);
-				gccr &= ~(3);
-				gccr |= GCCR_TCSS_AVTP;
-				ravb_write(ndev, gccr | GCCR_TCR, GCCR);
-				if (ravb_wait_reg(ndev, GCCR, GCCR_TCR, 0))
+				if (is_type_mpeg2ts == false)
 				{
-					pr_debug("timeout occurred at channel %d\n", ch);
-					continue;
-				}
-				check_point_time = ravb_read(ndev, GCT0);
-				gccr = ravb_read(ndev, GCCR);
-				gccr &= ~(3 << 8);
-				gccr &= ~(3);
-				gccr |= GCCR_TCSS_ADJGPTP;
-				ravb_write(ndev, gccr | GCCR_TCR, GCCR);
-				if (ravb_wait_reg(ndev, GCCR, GCCR_TCR, 0))
-				{
-					pr_debug("timeout occurred at channel %d\n", ch);
-					continue;
-				}
-				if ((pre_time < (pt_dev->time + period)) && ((pt_dev->time + period) <= check_point_time))
-				{
-					pt_dev->time = check_point_time + period;
+					pt_dev->time = pt_dev->time + period;
 				}
 				else
 				{
-					pt_dev->time = pt_dev->time + period;
+					if (check_period)
+					{
+						pre_time = pt_dev->time;
+						check_period = false;
+					}
+					do
+					{
+						if (ravb_wait_reg(ndev, GCCR, GCCR_TCR, 0))
+						{
+							pr_debug("timeout occurred at channel %d\n", ch);
+							continue;
+						}
+						gccr = ravb_read(ndev, GCCR);
+						gccr &= ~(1 << 5);
+						gccr |= GCCR_LMTT;
+						ravb_write(ndev, gccr , GCCR); /* Set bit LMTT = 1 */
+						gccr = ravb_read(ndev, GCCR);
+						gccr &= ~(3 << 8);
+						gccr |= GCCR_TCSS_AVTP;
+						ravb_write(ndev, gccr, GCCR); /* Select AVTP presentation time */
+						gccr = ravb_read(ndev, GCCR);
+						gccr &= ~(3);
+						gccr |= GCCR_TCR;
+						ravb_write(ndev, gccr, GCCR); /* Request for capturing AVTP presentation times */
+						if (ravb_wait_reg(ndev, GCCR, GCCR_TCR, 0))
+						{
+							pr_info("timeout occurred at channel %d\n", ch);
+							continue;
+						}
+					} while ((ravb_read(ndev, GCCR)& GCCR_TCSS_AVTP) != GCCR_TCSS_AVTP );
+
+					check_point_time = ravb_read(ndev, GCT0);
+					gccr = ravb_read(ndev, GCCR);
+					gccr &= ~(3 << 8);
+					gccr |= GCCR_TCSS_ADJGPTP;
+					ravb_write(ndev, gccr, GCCR); /* Select Adjusted gPTP timer value */
+					if (ravb_wait_reg(ndev, GCCR, GCCR_TCSS_ADJGPTP, GCCR_TCSS_ADJGPTP)) /* Wait bit TCSS = 01 */
+					{
+						pr_debug("timeout occurred at channel %d\n", ch);
+						continue;
+					}
+					if ((pre_time <= (pt_dev->time + period)) && ((pt_dev->time + period) <= check_point_time) && (pre_time < check_point_time))
+					{
+						pt_dev->time = check_point_time + period;
+					}
+					else if ((pre_time <= (pt_dev->time + period)) && ((pt_dev->time + period) > check_point_time) && (pre_time > check_point_time))
+					{
+						pt_dev->time = check_point_time + period;
+					}
+					else if ((pre_time > (pt_dev->time + period)) && ((pt_dev->time + period) <= check_point_time) && (pre_time > check_point_time))
+					{
+						pt_dev->time = check_point_time + period;
+					}
+					else
+					{
+						pt_dev->time = pt_dev->time + period;
+					}
 				}
 				ravb_ptp_update_compare(priv,
 							ch,
 							pt_dev->time);
+				pre_time = pt_dev->time;
 			} else {
 				ravb_write(ndev, BIT(3 + ch), GID);
 				pt_dev->status = 0;
+				check_period = true;
 			}
 
 			result = IRQ_HANDLED;
@@ -778,7 +817,7 @@ int mch_ptp_capture_cleanup(struct mch_private *priv)
 /*
  * In-Kernel PTP Timer API
  */
-void *mch_ptp_timer_open(u32 (*handler)(void *), void *arg)
+void *mch_ptp_timer_open(u32 (*handler)(void *, bool *), void *arg)
 {
 	struct mch_private *priv = mch_priv_ptr;
 	struct ptp_timer_device *pt_dev;
