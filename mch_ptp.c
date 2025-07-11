@@ -76,6 +76,7 @@
 static DEFINE_SPINLOCK(mch_ptp_cap_lock);
 static DEFINE_SPINLOCK(mch_ptp_timer_lock);
 
+#define MPEG2TS_PERIOD_THRESHOLD  10000000 /* 10ms */
 /*
  * PTP Capture
  */
@@ -426,7 +427,11 @@ static irqreturn_t mch_ptp_compare_interrupt(int irq, void *dev_id)
 		pt_dev = priv->tim_dev[ch];
 		if (gis & BIT(3 + ch)) {
 			if (pt_dev->func)
-				period = pt_dev->func(pt_dev->arg, &is_type_mpeg2ts);
+			{
+				do{
+					period = pt_dev->func(pt_dev->arg, &is_type_mpeg2ts);
+				}while((period < MPEG2TS_PERIOD_THRESHOLD) && (period != 0) && (is_type_mpeg2ts == true));
+			}
 			else
 				period = 0;
 
