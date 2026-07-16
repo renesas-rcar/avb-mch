@@ -961,8 +961,7 @@ static int mch_set_cs2000(struct mch_private *priv, u32 out_frq, u32 in_frq)
 }
 
 static const struct of_device_id net_device_match_table[] = {
-	{ .compatible = "renesas,etheravb-rcar-gen3",
-	  .data = (void *)RCAR_GEN3 },
+	{ .compatible = "renesas,etheravb-rcar-gen3" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, net_device_match_table);
@@ -1049,12 +1048,13 @@ int mch_regist_interrupt(struct mch_private *priv,
 {
 	struct net_device *ndev = priv->ndev;
 	struct ravb_private *net_priv = netdev_priv(ndev);
+	const struct ravb_hw_info *info = net_priv->info;
 	struct device *dev = priv->dev;
 	const char  *irq_name;
 	int irq;
 	int err;
-
-	if (WARN_ON(net_priv->chip_id != RCAR_GEN3))
+	/*Use multi_irq to distinguish between Gen2 and Gen3*/
+	if (WARN_ON(!info->multi_irqs))
 		return -EPERM;
 
 	/* regist interrupt of avtp capture */
